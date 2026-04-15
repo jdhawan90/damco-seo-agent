@@ -1,0 +1,56 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Generated agent outputs (code only in the repo, not runtime artifacts)
+outputs/reports/*
+outputs/briefs/*
+outputs/assets/*
+outputs/outreach/*
+outputs/audits/*
+outputs/archive/*
+!outputs/**/.gitkeep
+
+# Local databases and dumps
+*.sqlite
+*.sqlite3
+*.db
+*.sql.bak
+pg_dump_*.sql
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Migration state
+sql/.migrations_applied
