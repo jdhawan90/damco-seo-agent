@@ -103,10 +103,11 @@ def load_ranking_data(start_date: date | None, end_date: date | None,
     if not dates:
         return {"dates": [], "keywords": [], "by_keyword": {}}
 
-    # Get all rankings
+    # Get all rankings (both DataForSEO and GSC)
     sql = """
         SELECT k.keyword, k.offering, k.target_url,
-               kr.date, kr.rank_position, kr.rank_bucket, kr.url_found, kr.source
+               kr.date, kr.rank_position, kr.rank_bucket, kr.url_found,
+               kr.source, kr.clicks, kr.impressions, kr.ctr
         FROM keyword_rankings kr
         JOIN keywords k ON k.id = kr.keyword_id
         WHERE k.status = 'active'
@@ -125,7 +126,7 @@ def load_ranking_data(start_date: date | None, end_date: date | None,
 
     rows = fetch_all(sql, params2)
 
-    # Group by keyword
+    # Group by keyword, separating DataForSEO rankings from GSC metrics
     by_keyword: dict[str, dict] = {}
     for r in rows:
         kw = r["keyword"]
@@ -133,13 +134,22 @@ def load_ranking_data(start_date: date | None, end_date: date | None,
             by_keyword[kw] = {
                 "offering": r["offering"],
                 "target_url": r["target_url"],
-                "rankings": {},
+                "rankings": {},   # keyed by date — DataForSEO/manual data
+                "gsc": {},        # keyed by date — GSC data
             }
-        by_keyword[kw]["rankings"][r["date"]] = {
+        source = r["source"]
+        entry = {
             "position": r["rank_position"],
             "bucket": r["rank_bucket"],
             "url_found": r["url_found"],
+            "clicks": r.get("clicks"),
+            "impressions": r.get("impressions"),
+            "ctr": r.get("ctr"),
         }
+        if source == "gsc":
+            by_keyword[kw]["gsc"][r["date"]] = entry
+        else:
+            by_keyword[kw]["rankings"][r["date"]] = entry
 
     keywords_sorted = sorted(by_keyword.keys(), key=lambda k: (by_keyword[k]["offering"] or "", k))
 
@@ -204,19 +214,28 @@ def build_summary_sheet(wb: Workbook, data: dict) -> None:
 
 
 def build_detailed_sheet(wb: Workbook, data: dict) -> None:
-    """Sheet 2: Wide-format table (keyword × dates) — the format executives know."""
+    """Sheet 2: Wide-format table with SERP rank + GSC metrics side by side."""
     ws = wb.create_sheet("Detailed Rankings")
 
     dates = data["dates"]
     keywords = data["keywords"]
     by_keyword = data["by_keyword"]
 
+    # Check if any GSC data exists
+    has_gsc = any(kw_data["gsc"] for kw_data in by_keyword.values())
+
+    # Headers: Keyword | Offering | date1 | date2 | ... | GSC Avg Pos | GSC Clicks | GSC Impr | GSC CTR
     headers = ["Keyword", "Offering"] + [
         d.isoformat() if isinstance(d, date) else str(d) for d in dates
     ]
+    if has_gsc:
+        headers += ["GSC Avg Pos (14d)", "GSC Clicks", "GSC Impressions", "GSC CTR"]
+
     for col, h in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=h)
     _style_header(ws, 1, len(headers))
+
+    gsc_start_col = 3 + len(dates)  # first GSC column
 
     for i, kw in enumerate(keywords, 2):
         kw_data = by_keyword[kw]
@@ -225,6 +244,7 @@ def build_detailed_sheet(wb: Workbook, data: dict) -> None:
         ws.cell(row=i, column=2, value=kw_data["offering"])
         ws.cell(row=i, column=2).border = THIN_BORDER
 
+        # DataForSEO SERP positions
         for j, d in enumerate(dates, 3):
             ranking = kw_data["rankings"].get(d)
             if ranking:
@@ -243,10 +263,42 @@ def build_detailed_sheet(wb: Workbook, data: dict) -> None:
                 elif val <= 20:
                     cell.fill = STRIKING_FILL
 
+        # GSC metrics — use the latest GSC date available for this keyword
+        if has_gsc:
+            gsc_dates = sorted(kw_data["gsc"].keys())
+            if gsc_dates:
+                latest_gsc = kw_data["gsc"][gsc_dates[-1]]
+                gsc_pos = latest_gsc["position"]
+                ws.cell(row=i, column=gsc_start_col, value=gsc_pos if gsc_pos is not None else "N/A")
+                _style_data_cell(ws, i, gsc_start_col)
+                if isinstance(gsc_pos, (int, float)) and gsc_pos <= 20:
+                    ws.cell(row=i, column=gsc_start_col).fill = STRIKING_FILL if gsc_pos > 10 else GOOD_FILL
+
+                ws.cell(row=i, column=gsc_start_col + 1, value=latest_gsc.get("clicks") or 0)
+                _style_data_cell(ws, i, gsc_start_col + 1)
+
+                ws.cell(row=i, column=gsc_start_col + 2, value=latest_gsc.get("impressions") or 0)
+                _style_data_cell(ws, i, gsc_start_col + 2)
+
+                ctr = latest_gsc.get("ctr")
+                if ctr is not None:
+                    ws.cell(row=i, column=gsc_start_col + 3, value=ctr)
+                    ws.cell(row=i, column=gsc_start_col + 3).number_format = "0.00%"
+                _style_data_cell(ws, i, gsc_start_col + 3)
+            else:
+                for offset in range(4):
+                    ws.cell(row=i, column=gsc_start_col + offset, value="-")
+                    _style_data_cell(ws, i, gsc_start_col + offset)
+
     ws.column_dimensions["A"].width = 45
     ws.column_dimensions["B"].width = 25
     for col in range(3, 3 + len(dates)):
         ws.column_dimensions[get_column_letter(col)].width = 14
+    if has_gsc:
+        ws.column_dimensions[get_column_letter(gsc_start_col)].width = 18
+        ws.column_dimensions[get_column_letter(gsc_start_col + 1)].width = 12
+        ws.column_dimensions[get_column_letter(gsc_start_col + 2)].width = 14
+        ws.column_dimensions[get_column_letter(gsc_start_col + 3)].width = 10
 
 
 def build_movement_sheet(wb: Workbook, data: dict) -> None:
@@ -362,6 +414,89 @@ def build_striking_distance_sheet(wb: Workbook, data: dict) -> None:
     ws.column_dimensions["E"].width = 50
 
 
+def build_gsc_sheet(wb: Workbook, data: dict) -> None:
+    """Sheet 5: GSC Performance — dedicated view of Google's own metrics."""
+    ws = wb.create_sheet("GSC Performance")
+
+    by_keyword = data["by_keyword"]
+
+    # Collect all keywords that have GSC data
+    gsc_rows: list[tuple[str, dict, dict]] = []
+    for kw, kw_data in by_keyword.items():
+        gsc_dates = sorted(kw_data.get("gsc", {}).keys())
+        if gsc_dates:
+            latest_gsc = kw_data["gsc"][gsc_dates[-1]]
+            gsc_rows.append((kw, kw_data, latest_gsc))
+
+    if not gsc_rows:
+        ws.cell(row=1, column=1, value="No GSC data available. Run GSC enrichment first:")
+        ws.cell(row=2, column=1, value="  python -m keyword_intelligence.gsc_enrichment")
+        ws.cell(row=3, column=1)
+        ws.cell(row=4, column=1, value="Or run the rank tracker with GSC enabled (default):")
+        ws.cell(row=5, column=1, value="  python -m keyword_intelligence.rank_tracker")
+        return
+
+    headers = ["Keyword", "Offering", "SERP Rank", "GSC Avg Pos", "Clicks (14d)",
+               "Impressions (14d)", "CTR", "Gap (SERP vs GSC)"]
+    for col, h in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=h)
+    _style_header(ws, 1, len(headers))
+
+    # Sort by impressions descending (most visible keywords first)
+    gsc_rows.sort(key=lambda x: x[2].get("impressions") or 0, reverse=True)
+
+    for i, (kw, kw_data, gsc) in enumerate(gsc_rows, 2):
+        # Get latest SERP rank for comparison
+        ranking_dates = sorted(kw_data.get("rankings", {}).keys())
+        serp_pos = None
+        if ranking_dates:
+            serp_pos = kw_data["rankings"][ranking_dates[-1]].get("position")
+
+        gsc_pos = gsc.get("position")
+        clicks = gsc.get("clicks") or 0
+        impressions = gsc.get("impressions") or 0
+        ctr = gsc.get("ctr")
+
+        # Gap: positive = SERP rank is better than GSC avg (good), negative = worse
+        gap = None
+        if serp_pos is not None and gsc_pos is not None:
+            gap = round(gsc_pos) - serp_pos  # positive means GSC sees you worse
+
+        ws.cell(row=i, column=1, value=kw).border = THIN_BORDER
+        ws.cell(row=i, column=2, value=kw_data["offering"]).border = THIN_BORDER
+
+        ws.cell(row=i, column=3, value=serp_pos if serp_pos is not None else "N/A")
+        _style_data_cell(ws, i, 3)
+
+        ws.cell(row=i, column=4, value=round(gsc_pos) if gsc_pos is not None else "N/A")
+        _style_data_cell(ws, i, 4)
+
+        ws.cell(row=i, column=5, value=clicks)
+        _style_data_cell(ws, i, 5)
+
+        ws.cell(row=i, column=6, value=impressions)
+        _style_data_cell(ws, i, 6)
+
+        if ctr is not None:
+            ws.cell(row=i, column=7, value=ctr)
+            ws.cell(row=i, column=7).number_format = "0.00%"
+        _style_data_cell(ws, i, 7)
+
+        if gap is not None:
+            ws.cell(row=i, column=8, value=gap)
+            cell = ws.cell(row=i, column=8)
+            if gap > 3:
+                cell.fill = BAD_FILL   # GSC sees much worse than SERP snapshot
+            elif gap < -3:
+                cell.fill = GOOD_FILL  # GSC sees better (trending up)
+        _style_data_cell(ws, i, 8)
+
+    ws.column_dimensions["A"].width = 45
+    ws.column_dimensions["B"].width = 25
+    for col in range(3, 9):
+        ws.column_dimensions[get_column_letter(col)].width = 16
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -385,6 +520,7 @@ def generate_report(
     build_detailed_sheet(wb, data)
     build_movement_sheet(wb, data)
     build_striking_distance_sheet(wb, data)
+    build_gsc_sheet(wb, data)
 
     # Output path
     if output_path:
@@ -399,7 +535,7 @@ def generate_report(
 
     wb.save(str(path))
     print(f"\n  Report saved to: {path}")
-    print(f"  Sheets: Summary, Detailed Rankings, Movement, Striking Distance")
+    print(f"  Sheets: Summary, Detailed Rankings, Movement, Striking Distance, GSC Performance")
     print(f"  Keywords: {len(data['keywords'])}")
     print(f"  Date range: {data['dates'][0]} to {data['dates'][-1]}")
     print()

@@ -246,7 +246,8 @@ def print_summary(results: list[dict], run_date: date) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
-def run(offering: str | None = None, queue: str = "standard", dry_run: bool = False) -> dict:
+def run(offering: str | None = None, queue: str = "standard", dry_run: bool = False,
+        skip_gsc: bool = False, gsc_days: int = 14) -> dict:
     """
     Execute a full rank tracking run. Returns a summary dict.
     """
@@ -304,6 +305,16 @@ def run(offering: str | None = None, queue: str = "standard", dry_run: bool = Fa
     print(f"  Estimated cost:   ~${total * 0.0006:.4f} (standard queue)")
     print()
 
+    # GSC Enrichment — pull 14-day average position + clicks/impressions
+    gsc_stats: dict | None = None
+    if not dry_run and not skip_gsc:
+        try:
+            from keyword_intelligence.gsc_enrichment import run as gsc_run
+            gsc_stats = gsc_run(lookback_days=gsc_days, dry_run=dry_run)
+        except Exception as exc:
+            logger.warning("GSC enrichment failed (non-fatal): %s", exc)
+            gsc_stats = {"status": "error", "error": str(exc)}
+
     return {
         "status": "success" if errors == 0 else "partial",
         "run_date": run_date.isoformat(),
@@ -313,6 +324,7 @@ def run(offering: str | None = None, queue: str = "standard", dry_run: bool = Fa
         "inserted": inserted,
         "duration_seconds": round(duration, 2),
         "results": results,
+        "gsc": gsc_stats,
     }
 
 
@@ -325,6 +337,10 @@ def main() -> None:
                         help="DataForSEO queue tier (default: standard)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Fetch rankings but don't write to DB")
+    parser.add_argument("--skip-gsc", action="store_true",
+                        help="Skip GSC enrichment step")
+    parser.add_argument("--gsc-days", type=int, default=14,
+                        help="GSC lookback window in days (default: 14)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Enable debug logging")
     args = parser.parse_args()
@@ -334,7 +350,8 @@ def main() -> None:
         format="%(asctime)s  %(name)s  %(levelname)s  %(message)s",
     )
 
-    run(offering=args.offering, queue=args.queue, dry_run=args.dry_run)
+    run(offering=args.offering, queue=args.queue, dry_run=args.dry_run,
+        skip_gsc=args.skip_gsc, gsc_days=args.gsc_days)
 
 
 if __name__ == "__main__":
