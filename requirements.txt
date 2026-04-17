@@ -15,6 +15,9 @@ anthropic>=0.39.0              # Claude API client
 beautifulsoup4>=4.12.3
 lxml>=5.1.0
 
+# ---- Reporting -------------------------------------------------------------
+openpyxl>=3.1.2                # Excel report generation
+
 # ---- Development -----------------------------------------------------------
 # Kept here rather than a separate dev-requirements to keep setup one-step.
 pytest>=8.0.0
