@@ -247,37 +247,116 @@ Warn the user that dry run still incurs API cost.
 
 **Do not commit the import script.** Write it inline, run it, verify results, then delete it. The repo stays focused on agent code, not data loading.
 
-**Template for inline import:**
+### Pre-import checklist (do this BEFORE writing the import code)
+
+Skipping any of these has caused real data problems. Each item traces to a specific past mistake.
+
+1. **List all sheet names with `repr()` — watch for trailing whitespace.**
+   ```python
+   print('Sheets:', [repr(s) for s in wb.sheetnames])
+   ```
+   Real case: a file had `'Overall Rankings '` (trailing space) and `'Sheet1'`. Getting the wrong sheet silently produced bad columns. Use `repr()` so whitespace is visible.
+
+2. **Dump the header row cell-by-cell to verify column positions.** Do not trust `ws.iter_rows()` output from an exploratory script — it can skip empty cells and mislead you about which column holds what.
+   ```python
+   for cell in ws[header_row]:
+       print(f'  col {cell.column} ({cell.column_letter}): {cell.value!r}')
+   ```
+
+3. **Compare sheets in the same file carefully.** A mastersheet may have multiple sheets with similar-looking headers. The "summary" sheet often has fewer columns than the "detail" sheet. Confirm with the user which sheet is the source of truth before importing.
+   - Example: one file had `Overall Rankings ` (4 columns: Category, Priority, SEO Member, Keywords — 166 rows, the master) and `Sheet1` (10+ columns including search volume, intent, ranking history — 511 rows, a superset of candidates). The sheet with FEWER columns was the one to use.
+
+4. **Identify ALL columns that have merged cells for fill-down.** In a master sheet, the executive and priority usually span an entire category block — only the first row has the value, subsequent rows rely on the merge. If you only fill-down one column (e.g., only Category) you will lose 80%+ of the executive assignments.
+   ```python
+   last_category = last_priority = last_executive = None
+   for row_idx in range(header_row + 1, ws.max_row + 1):
+       cat = ws.cell(row_idx, cat_col).value
+       pri = ws.cell(row_idx, pri_col).value
+       mem = ws.cell(row_idx, mem_col).value
+       kw = ws.cell(row_idx, kw_col).value
+       if cat: last_category = str(cat).strip()
+       if pri: last_priority = str(pri).strip()
+       if mem: last_executive = str(mem).strip().title()
+       if not kw: continue
+       # ... now use last_category, last_priority, last_executive
+   ```
+
+5. **Always dry-run the extraction before writing to the DB.** Print `len(keywords_data)` and a breakdown by executive/category. Compare with the user's expected count. If they disagree, **stop and ask** before proceeding.
+
+6. **Confirm the expected count with the user.** "I see 166 keywords, 104 for Himanshu, 62 for Gunjan. Proceed?" — cheap, prevents expensive rework.
+
+### Template for inline import
 
 ```python
 # Run this as a one-off — do not save as a .py file in the repo
 import sys; sys.path.insert(0, '.')
 import openpyxl
-from common.database import connection
+from common.database import connection, fetch_all
 
-wb = openpyxl.load_workbook("path/to/file.xlsx", data_only=True)
-ws = wb["SheetName"]
+FILE = "path/to/file.xlsx"
+SHEET = "SheetName"   # copy-paste from repr() output — may contain whitespace
+OFFERING = "OfferingName"
+ALLOWED_EXECS = {"ExecA", "ExecB"}  # if filtering is required
 
+wb = openpyxl.load_workbook(FILE, data_only=True)
+ws = wb[SHEET]
+header = {str(c.value).strip(): c.column for c in ws[HEADER_ROW] if c.value}
+
+keywords_data = []
+last_cat = last_pri = last_exec = None
+for row_idx in range(HEADER_ROW + 1, ws.max_row + 1):
+    cat = ws.cell(row_idx, header['Category']).value
+    pri = ws.cell(row_idx, header['Page Priority']).value
+    mem = ws.cell(row_idx, header['SEO Member']).value
+    kw  = ws.cell(row_idx, header['Keywords']).value
+    if cat: last_cat = str(cat).strip()
+    if pri: last_pri = str(pri).strip()
+    if mem: last_exec = str(mem).strip().title()
+    if not kw or not str(kw).strip():
+        continue
+    if ALLOWED_EXECS and last_exec not in ALLOWED_EXECS:
+        continue
+    importance = last_pri.lower() if last_pri and last_pri.lower() in ('high','medium','low') else 'medium'
+    keywords_data.append({
+        'keyword': str(kw).strip().lower(),
+        'services': last_cat,
+        'importance': importance,
+        'executive': last_exec,
+    })
+
+# Print summary — VERIFY with the user before inserting
+exec_counts = {}
+for kw in keywords_data:
+    exec_counts[kw['executive']] = exec_counts.get(kw['executive'], 0) + 1
+print(f'Extracted: {len(keywords_data)} — by exec: {exec_counts}')
+
+# (pause here — confirm with user if counts don't match expectation)
+
+# Upsert into database
 with connection() as conn:
     with conn.cursor() as cur:
-        for row_idx in range(2, ws.max_row + 1):
-            keyword = ws.cell(row_idx, KEYWORD_COL).value
-            offering = ws.cell(row_idx, OFFERING_COL).value
-            # ... extract other fields
-            if not keyword:
-                continue
-            cur.execute("""
-                INSERT INTO keywords (keyword, offering, services, importance, type, status)
-                VALUES (%s, %s, %s, %s, 'primary', 'active')
-                ON CONFLICT (keyword, offering) DO UPDATE SET
-                    services = COALESCE(EXCLUDED.services, keywords.services),
-                    importance = EXCLUDED.importance
-                RETURNING id
-            """, (keyword.strip().lower(), offering, services, importance))
-            # ... assign to executive if applicable
+        for name in {kw['executive'] for kw in keywords_data}:
+            cur.execute("INSERT INTO seo_executives (name) VALUES (%s) "
+                        "ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id", (name,))
+        # then insert keywords + assignments as in the first example
 ```
 
-**After import:**
+### Re-import / cleanup
+
+If a previous import was wrong, delete it explicitly before re-importing:
+
+```sql
+DELETE FROM executive_keyword_assignments
+    WHERE keyword_id IN (SELECT id FROM keywords WHERE offering = %s);
+DELETE FROM keyword_search_volume
+    WHERE keyword_id IN (SELECT id FROM keywords WHERE offering = %s);
+DELETE FROM keywords WHERE offering = %s;
+```
+
+Never rely on "it'll get overwritten on re-import" — ON CONFLICT only handles matching keys, not orphaned rows from previous wrong data.
+
+### After import
+
 1. Verify row counts with a `SELECT count(*)` query.
 2. Summarize what was added (by offering, by executive).
 3. Tell the user, but don't commit the loader.
