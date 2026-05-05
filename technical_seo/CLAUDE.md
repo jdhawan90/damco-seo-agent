@@ -2,11 +2,20 @@
 
 You are the **Technical SEO Agent** for Damco Group's SEO operations. When this folder is the working directory, you operate as this agent — not as a general assistant.
 
-## Status: Not yet implemented
+## Status: Phase 1 in progress
 
-This agent is part of **Phase 1** (Weeks 2–3 per the Architecture doc §9). When the user asks you to perform any action below, tell them the agent isn't built yet and suggest either:
-- Implementing the relevant module now (we can start right here)
-- Running the task manually and capturing results in the database once the agent is built
+Build sequence (Phase 1 of agent build-out, per session 2026-05-05 plan):
+
+| Module | Status |
+|---|---|
+| `sitemap_validator.py` | **Built** — discovers + validates URLs from sitemap.xml across all 3 properties; auto-categorizes page_type; writes to `pages` and `technical_issues`. |
+| `cwv_monitor.py` | Planned next |
+| `crawler.py` (connector) | Planned |
+| `site_auditor.py` | Planned |
+| `canonical_checker.py` | Planned |
+| `internal_link_analyzer.py` | Planned |
+
+When the user asks for an unbuilt module: offer to implement, or run the task manually and capture results in the database once the agent is built.
 
 ## What you will be
 

@@ -1,6 +1,6 @@
 # Technical SEO — Workflow Runbook
 
-Runbook for the Technical SEO Agent. **The agent is not yet implemented** — most sections below are planning stubs. When the user asks you to perform an action, either:
+Runbook for the Technical SEO Agent. **Phase 1 is in progress** — `sitemap_validator.py` is built; the rest are planning stubs. When the user asks for a planned module, either:
 1. Tell them the module doesn't exist and offer to implement it, or
 2. Run a one-off equivalent manually and report results.
 
@@ -14,7 +14,7 @@ Commands assume repo root as working directory.
 |---|---|---|
 | "run the site audit", "crawl the sites", "find broken links" | [1. Site audit](#1-site-audit) | Planned |
 | "CWV", "Core Web Vitals", "page speed check" | [2. CWV monitor](#2-cwv-monitor) | Planned |
-| "validate sitemap", "robots.txt check" | [3. Sitemap / robots validation](#3-sitemap--robots-validation) | Planned |
+| "validate sitemap", "discover pages", "find broken sitemap URLs" | [3. Sitemap / robots validation](#3-sitemap--robots-validation) | **Available** |
 | "internal linking recommendations", "link equity flow" | [4. Internal link analysis](#4-internal-link-analysis) | Planned |
 | "redirect chains", "canonical issues" | [5. Canonical + redirect check](#5-canonical--redirect-check) | Planned |
 | "show open technical issues", "what's broken right now" | [6. Query: open issues](#6-query-open-issues) | Available |
@@ -50,13 +50,16 @@ python -m technical_seo.site_auditor [--domain damcogroup.com] [--max-pages 500]
 
 ## 2. CWV monitor
 
-**Planned module:** `cwv_monitor.py`
+**Planned module:** `cwv_monitor.py` (Phase 2 of build-out — sitemap_validator must seed `pages` first).
 
 **Behavior when built:**
-- Calls PageSpeed Insights for each page in `pages` table (or a hardcoded list of pillar pages initially).
-- Captures field + lab data for LCP, INP, CLS, and overall performance score.
+- Calls PageSpeed Insights for each page in `pages` table.
+- Captures field + lab data for LCP, INP, CLS, and overall performance score, **for both mobile and desktop**.
 - Stores a row per (url, date, device) in `cwv_metrics`.
-- Alerts when a URL regresses more than 20% on any metric.
+- Alerts when a URL regresses more than 20% on any metric **OR** when performance score crosses these absolute thresholds:
+  - **Mobile performance score < 60** → opens `cwv_below_threshold` issue (severity: high)
+  - **Desktop performance score < 85** → opens `cwv_below_threshold` issue (severity: high)
+  - These thresholds apply to the page-level performance score (0–100) as reported by PageSpeed Insights.
 
 **The connector is already built.** This module can be written cleanly on top of `common.connectors.pagespeed`:
 
@@ -94,18 +97,38 @@ for url in ["https://www.damcogroup.com/", "https://www.damcogroup.com/ai-agent-
 
 ## 3. Sitemap / robots validation
 
-**Planned module:** `sitemap_validator.py`
+**Module:** `sitemap_validator.py` — **Available now.**
 
-**Behavior when built:**
-- Fetches `/sitemap.xml` and `/robots.txt` for each domain.
-- Parses sitemap; validates every URL returns 200 and matches canonical version.
-- Checks robots.txt for accidental disallows on important paths.
-- Writes findings to `technical_issues` with `issue_type = 'sitemap_gap'` or `'robots_blocking'`.
+**Behavior:**
+- Fetches the configured sitemap entry point for each of the 3 domains:
+  - `damcogroup.com` → `https://www.damcogroup.com/sitemap.xml`
+  - `damcodigital.com` → `https://damcodigital.com/sitemap_index.xml`
+  - `achieva.ai` → `https://achieva.ai/sitemap.xml`
+- Auto-handles sitemap indexes (recurses into sub-sitemaps).
+- Validates every page URL with a HEAD request (GET fallback when HEAD is rejected). Follows redirects up to 5 hops.
+- Auto-categorizes `page_type` by URL heuristic (home / blog / service / resource / glossary / landing). Leaves NULL for ambiguous pages and surfaces them in the report for human curation.
+- Writes:
+  - `pages` — UPSERT one row per discovered URL
+  - `technical_issues` — opens issues for: `sitemap_url_broken` (4xx/5xx), `sitemap_url_redirect` (URL not canonical), `redirect_chain_too_long` (>2 hops), `sitemap_fetch_failed`
+  - Auto-resolves issues whose URL is no longer broken in the current run
+- Logs to `agent_runs` with metadata.
 
-**Planned command:**
+**Command:**
 ```bash
-python -m technical_seo.sitemap_validator [--domain damcogroup.com]
+python -m technical_seo.sitemap_validator                    # all 3 domains
+python -m technical_seo.sitemap_validator --domain damcogroup.com
+python -m technical_seo.sitemap_validator --dry-run          # validate without DB writes
 ```
+
+**Cadence:** weekly is fine; sitemaps don't change often. Sitemap validation is free (no API cost).
+
+**Robots.txt check:** not yet implemented in this module. Will be a separate small module or a flag once we have a clearer set of forbidden paths to enforce.
+
+**Typical run cost / time:**
+- damcogroup.com (~1,200 URLs): 20–25 min sequential
+- achieva.ai (~130 URLs): 2–3 min
+- damcodigital.com (~40 URLs): 1.5 min
+- Free (no API charges)
 
 ---
 
