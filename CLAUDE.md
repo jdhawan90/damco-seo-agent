@@ -34,7 +34,7 @@ When the user's request is ambiguous, use this table to decide which sub-agent s
 | "site audit", "broken links", "CWV", "core web vitals", "sitemap issues", "canonical problems", "internal links" | `technical_seo/` |
 | "backlinks", "outreach", "guest posts", "platform opportunities" | `offpage_links/` |
 | "content brief", "compliance check", "glossary coverage", "new page content plan" | `content_operations/` |
-| "competitor changes", "competitor backlinks", "gap analysis", "what are they doing we're not" | `competitive_intelligence/` |
+| "competitor changes", "competitor backlinks", "gap analysis", "what are they doing we're not", "who's outranking us", "share of voice", "new entrants in the SERP", "threat tier" | `competitive_intelligence/` |
 | "whitepaper", "infographic", "slide deck", "video script", "downloadable PDF" | `content_assets/` |
 | "prospect audit", "sales deck", "RFP response", "client pitch" | `sales_enablement/` |
 

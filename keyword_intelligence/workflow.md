@@ -27,32 +27,46 @@ All commands run from the repo root (`damco-seo-agents/`). The Python interprete
 
 **When:** user asks to track rankings, refresh the database, or doesn't specify scope.
 
-**Cost check:** 798 keywords × $0.0006 = ~$0.48 on standard queue. Live queue is ~$1.60. If the user hasn't specified, use **standard**.
+**Cost check:** 1,112 keywords × $0.0006 = ~$0.67 on standard queue. Live queue is ~$2.20. If the user hasn't specified, use **standard**. Default cadence is fortnightly — a routine run should filter to keywords whose latest snapshot is older than `keywords.snapshot_frequency_days` (default 14), which can drop cost below $0.67 once partial snapshots accumulate.
 
 **Steps:**
 
-1. Confirm scope and queue with the user if not already clear. If they just said "run it", assume all active keywords on the standard queue.
+1. Confirm scope and queue with the user if not already clear. If they just said "run it", assume all active keywords on the standard queue, fortnightly-due only.
 2. Execute:
    ```bash
    python -m keyword_intelligence.rank_tracker
    ```
+   Flags:
+   - `--offering "AI"` — restrict to one offering (still respects cadence)
+   - `--all` — force every active keyword regardless of last snapshot date (use sparingly; a full forced run on 1,112 keywords costs ~$0.67)
+   - `--queue live` — synchronous SERP fetch, ~3x cost
+   - `--dry-run` — call DataForSEO but skip all DB writes
+   - `--skip-gsc` — skip the GSC enrichment step at the end
 3. The command prints:
-   - Batch progress (7–8 batches of 100 keywords)
+   - Batch progress (~12 batches of 100 keywords)
    - Bucket distribution (1-5, 5-10, 10-20, 20-50, 50+, not-found)
    - Per-keyword position and matched Damco domain
    - Striking distance list (positions 11–20)
    - Summary totals
-4. GSC enrichment runs automatically at the end (14-day lookback). It prints its own summary.
-5. After completion, verify the agent run was logged:
+4. **Competition tracking write contract** — for every keyword queried, the tracker also writes:
+   - One row to `keyword_serp_snapshots` (SERP-level context: AI Overview presence + cited domains, SERP features, damco position, top 10 array)
+   - Up to 10 rows to `competitor_rankings` (one per top-10 result with `url_title`, `page_type`, `serp_features_owned`, `is_new_entrant`, `previous_position`, `position_change`)
+   - Upserts into `competitors` for every domain seen — new domains get a stub row with `first_seen_date = today`; seen-before domains get `last_seen_date` updated
+   - Calls `recompute_competitor_aggregates(competitor_id)` for every touched competitor — this updates `keyword_appearance_count`, `offering_appearance_count`, `threat_tier` and emits `threat_tier_changed` events when the tier flips
+   - Diff vs previous snapshot → emits events to `competitor_serp_events` (`new_entrant`, `drop_out`, `position_gain`, `position_drop`, `damco_*`, `serp_feature_*`)
+   - At end of cycle: `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_offering_competition` (must run outside the snapshot transaction)
+5. GSC enrichment runs automatically at the end (14-day lookback). It prints its own summary.
+6. After completion, verify the agent run was logged:
    ```bash
    python -c "import sys; sys.path.insert(0, '.'); from common.database import fetch_all
    for r in fetch_all('SELECT agent_name, status, records_processed, run_date, metadata FROM agent_runs ORDER BY run_date DESC LIMIT 2'):
        print(r)"
    ```
-6. Report back to user:
+7. Report back to user:
    - Total keywords tracked
    - Brand found / not found split
    - New striking distance keywords (if any)
+   - Competition-side highlights: count of `new_entrant`, `position_gain`, `damco_*` events at severity ≥ medium
    - Any errors from either phase
 
 **Failure modes:**
@@ -234,6 +248,7 @@ python -m keyword_intelligence.rank_tracker --dry-run
 ```
 
 - DataForSEO calls still happen (costs real money) unless you skip with `--skip-gsc --dry-run` combined with offering filtering.
+- Cadence filter still applies — `--dry-run` only queries keywords that are due. Combine with `--all` to force-fetch every active keyword without writing.
 - Nothing is written to `keyword_rankings` or `agent_runs`.
 - Useful for validating keyword coverage and brand matching before committing.
 
