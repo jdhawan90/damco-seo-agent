@@ -51,15 +51,17 @@ def get_cwv_metrics(url: str, strategy: Strategy = "mobile") -> dict:
         "raw":     <full API response>,
     }
     """
-    if not settings.PAGESPEED_API_KEY:
-        raise PageSpeedError("PAGESPEED_API_KEY is not set")
-
-    params = {
+    # PageSpeed Insights works without an API key (rate-limited to ~25 queries
+    # per 100 seconds per IP). With a key the limit goes to 25k/day.
+    params: dict = {
         "url": url,
         "strategy": strategy,
         "category": "performance",
-        "key": settings.PAGESPEED_API_KEY,
     }
+    if settings.PAGESPEED_API_KEY and settings.PAGESPEED_API_KEY != "your_key_here":
+        params["key"] = settings.PAGESPEED_API_KEY
+    else:
+        logger.debug("PAGESPEED_API_KEY not set — using anonymous quota (25 queries / 100s)")
 
     last_exc: Exception | None = None
     for attempt in range(1, MAX_RETRIES + 1):

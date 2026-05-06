@@ -13,7 +13,7 @@ Commands assume repo root as working directory.
 | User says / asks | Workflow section | Status |
 |---|---|---|
 | "run the site audit", "crawl the sites", "find broken links" | [1. Site audit](#1-site-audit) | Planned |
-| "CWV", "Core Web Vitals", "page speed check" | [2. CWV monitor](#2-cwv-monitor) | Planned |
+| "CWV", "Core Web Vitals", "page speed check" | [2. CWV monitor](#2-cwv-monitor) | **Built** (needs API key) |
 | "validate sitemap", "discover pages", "find broken sitemap URLs" | [3. Sitemap / robots validation](#3-sitemap--robots-validation) | **Available** |
 | "internal linking recommendations", "link equity flow" | [4. Internal link analysis](#4-internal-link-analysis) | Planned |
 | "redirect chains", "canonical issues" | [5. Canonical + redirect check](#5-canonical--redirect-check) | Planned |
@@ -50,48 +50,71 @@ python -m technical_seo.site_auditor [--domain damcogroup.com] [--max-pages 500]
 
 ## 2. CWV monitor
 
-**Planned module:** `cwv_monitor.py` (Phase 2 of build-out — sitemap_validator must seed `pages` first).
+**Module:** `cwv_monitor.py` — **Built. Blocked on PAGESPEED_API_KEY.**
 
-**Behavior when built:**
-- Calls PageSpeed Insights for each page in `pages` table.
-- Captures field + lab data for LCP, INP, CLS, and overall performance score, **for both mobile and desktop**.
-- Stores a row per (url, date, device) in `cwv_metrics`.
-- Alerts when a URL regresses more than 20% on any metric **OR** when performance score crosses these absolute thresholds:
-  - **Mobile performance score < 60** → opens `cwv_below_threshold` issue (severity: high)
-  - **Desktop performance score < 85** → opens `cwv_below_threshold` issue (severity: high)
-  - These thresholds apply to the page-level performance score (0–100) as reported by PageSpeed Insights.
+### Prerequisite: obtain PageSpeed Insights API key (free, ~5 min)
 
-**The connector is already built.** This module can be written cleanly on top of `common.connectors.pagespeed`:
+PageSpeed Insights heavily rate-limits unauthenticated requests from server IPs (we observed 429 on the very first call). A free API key removes the limit and gives 25,000 queries/day.
 
-```python
-from common.connectors.pagespeed import get_cwv_metrics
-result = get_cwv_metrics(url, strategy="mobile")
-# result = {"url", "strategy", "performance_score", "lcp_ms", "inp_ms", "cls", "source", "raw"}
-```
+To obtain:
+1. Open https://console.cloud.google.com
+2. Create or select a project
+3. Enable the **"PageSpeed Insights API"** (search in API library)
+4. Credentials → Create Credentials → API key
+5. Optionally restrict to the PageSpeed API
+6. Paste the key into `.env`: `PAGESPEED_API_KEY=<your_key>`
 
-**Planned command:**
+The connector auto-detects the key. No code change needed once the key is set.
+
+### Behavior
+
+- For each page in `pages` whose `page_type` matches the filter (default: `home`, `pillar`, `service`):
+  - For each strategy (default: `mobile` + `desktop`):
+    - If the latest snapshot for `(url, device)` is older than `--cadence` days (default 7), enqueue.
+- Calls PageSpeed Insights in parallel (default 4 workers).
+- Captures field-data-preferred CWV (LCP, INP, CLS) + Lighthouse performance score (0-100).
+- Compares to previous snapshot for that `(url, device)` to detect ≥20% regressions in any metric.
+- Writes `cwv_metrics` (one row per url/date/device).
+- Opens `technical_issues`:
+  - `cwv_below_threshold` (severity high) when score < threshold:
+    - **Mobile threshold:** 60
+    - **Desktop threshold:** 85
+  - `cwv_regression` (severity medium) when any metric drops ≥20% vs the previous snapshot.
+  - Both issue types include `details.device` so the same URL can have separate mobile/desktop issues.
+- Auto-resolves issues that are no longer triggered.
+- Logs to `agent_runs`.
+
+### Command
+
 ```bash
-python -m technical_seo.cwv_monitor [--strategy mobile] [--pages-table]
+# Default: all 3 domains, page_type IN (home, pillar, service), mobile + desktop, weekly cadence
+python -m technical_seo.cwv_monitor
+
+# One domain, all device strategies
+python -m technical_seo.cwv_monitor --domain damcogroup.com
+
+# Cover blog + resource pages too (much larger run)
+python -m technical_seo.cwv_monitor --page-types home,pillar,service,blog,resource
+
+# Force re-check ignoring cadence
+python -m technical_seo.cwv_monitor --all
+
+# Mobile only
+python -m technical_seo.cwv_monitor --strategies mobile
+
+# Dry run — call PageSpeed but don't write
+python -m technical_seo.cwv_monitor --dry-run
 ```
 
-**Workaround until built (one-off):**
-```python
-import sys; sys.path.insert(0, '.')
-from common.connectors.pagespeed import get_cwv_metrics
-from common.database import connection
+### Cost / time
 
-for url in ["https://www.damcogroup.com/", "https://www.damcogroup.com/ai-agent-development", ...]:
-    m = get_cwv_metrics(url, strategy="mobile")
-    with connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""INSERT INTO cwv_metrics (url, lcp_ms, inp_ms, cls_score, performance_score, device)
-                           VALUES (%s, %s, %s, %s, %s, 'mobile')
-                           ON CONFLICT (url, date, device) DO UPDATE SET
-                             lcp_ms = EXCLUDED.lcp_ms, inp_ms = EXCLUDED.inp_ms,
-                             cls_score = EXCLUDED.cls_score,
-                             performance_score = EXCLUDED.performance_score""",
-                        (m["url"], m["lcp_ms"], m["inp_ms"], m["cls"], m["performance_score"]))
-```
+- Free with API key (25k queries/day quota).
+- A typical Lighthouse audit takes 10–30s; 4 workers ≈ ~12s effective per call.
+- Estimate for default scope (home + service pages across 3 domains, both devices):
+  - damcogroup.com: ~226 service + 1 home = 227 pages × 2 = ~454 calls ≈ 23 min
+  - damcodigital.com: 19 + 1 = 20 × 2 = 40 calls ≈ 2 min
+  - achieva.ai: 14 × 2 = 28 calls ≈ 1.5 min
+  - **Full default run: ~30 min**
 
 ---
 

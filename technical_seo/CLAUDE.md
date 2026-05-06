@@ -9,8 +9,8 @@ Build sequence (Phase 1 of agent build-out, per session 2026-05-05 plan):
 | Module | Status |
 |---|---|
 | `sitemap_validator.py` | **Built** — discovers + validates URLs from sitemap.xml across all 3 properties; auto-categorizes page_type; writes to `pages` and `technical_issues`. |
-| `cwv_monitor.py` | Planned next |
-| `crawler.py` (connector) | Planned |
+| `cwv_monitor.py` | **Built** — ready to run; **blocked on PAGESPEED_API_KEY**. Pulls Core Web Vitals (LCP/INP/CLS) and Lighthouse score for both mobile + desktop, evaluates against the agreed thresholds (mobile≥60, desktop≥85), detects 20%+ regressions, opens/resolves `technical_issues`. |
+| `crawler.py` (connector) | Planned next |
 | `site_auditor.py` | Planned |
 | `canonical_checker.py` | Planned |
 | `internal_link_analyzer.py` | Planned |
