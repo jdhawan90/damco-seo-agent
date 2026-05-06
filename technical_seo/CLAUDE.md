@@ -9,9 +9,9 @@ Build sequence (Phase 1 of agent build-out, per session 2026-05-05 plan):
 | Module | Status |
 |---|---|
 | `sitemap_validator.py` | **Built** — discovers + validates URLs from sitemap.xml across all 3 properties; auto-categorizes page_type; writes to `pages` and `technical_issues`. |
-| `cwv_monitor.py` | **Built** — ready to run; **blocked on PAGESPEED_API_KEY**. Pulls Core Web Vitals (LCP/INP/CLS) and Lighthouse score for both mobile + desktop, evaluates against the agreed thresholds (mobile≥60, desktop≥85), detects 20%+ regressions, opens/resolves `technical_issues`. |
-| `crawler.py` (connector) | Planned next |
-| `site_auditor.py` | Planned |
+| `cwv_monitor.py` | **Built and validated** — verified end-to-end on damcodigital.com (40/40 pages, 100% below threshold — surfaced real performance findings: homepage mobile score 16, LCP 18s). Mobile≥60 / desktop≥85 thresholds applied; 20%+ regression detection wired up. |
+| `crawler.py` (connector) | **Built** at `common/connectors/crawler.py`. Polite HTTP+HTML fetcher: per-origin rate limit, robots.txt cache, returns CrawlResult with title/meta/canonical/h1-h2/JSON-LD/microdata/links/images/word_count. Used by the next 3 modules. |
+| `site_auditor.py` | Planned next |
 | `canonical_checker.py` | Planned |
 | `internal_link_analyzer.py` | Planned |
 
@@ -48,11 +48,11 @@ Tables populated: `technical_issues`, `cwv_metrics`, `internal_links`.
 
 ## Operating contract (Read → Process → Write → Notify)
 
-When implemented, every module follows the standard lifecycle. Connectors used:
-- `common.connectors.crawler` (needs to be built — HTTP + BeautifulSoup wrapper)
-- `common.connectors.pagespeed` (already built — CWV + Lighthouse score)
+Every module follows the standard lifecycle. Connectors used:
+- `common.connectors.crawler` — built. Polite HTTP+HTML fetcher returning a `CrawlResult` (title, meta, canonical, headings, JSON-LD, microdata, links, images, word_count). Used by site_auditor, canonical_checker, internal_link_analyzer.
+- `common.connectors.pagespeed` — built. CWV + Lighthouse score. Used by cwv_monitor.
 
-Use rule-based logic throughout. No LLM required for this agent's core loop.
+Use rule-based logic throughout. No LLM required for this agent's core loop (internal_link_analyzer is the one exception — uses Claude API for anchor text generation).
 
 ## Safety rules (will apply once implemented)
 
