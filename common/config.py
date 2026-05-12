@@ -25,8 +25,14 @@ from dotenv import load_dotenv
 # Load .env from repo root. find_dotenv() would also work but anchoring to
 # this file's location is more predictable when scripts are invoked from
 # various working directories (cron, one-off runs, tests).
+#
+# override=True: the repo's .env is the authoritative source. Pre-existing
+# shell-environment values (e.g. an empty ANTHROPIC_API_KEY exported by the
+# user's shell profile) would otherwise silently shadow .env, leaving
+# scripts puzzled about why their keys "aren't set". With override, the
+# .env value wins — matching how a non-Python operator expects it to work.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(_REPO_ROOT / ".env")
+load_dotenv(_REPO_ROOT / ".env", override=True)
 
 
 def _require(name: str) -> str:

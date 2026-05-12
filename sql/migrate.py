@@ -33,8 +33,10 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 
 def main() -> int:
     # Load .env from repo root regardless of where we're invoked from.
+    # override=True ensures the .env value wins over any pre-existing
+    # shell env var (see common/config.py for the full rationale).
     repo_root = Path(__file__).resolve().parent.parent
-    load_dotenv(repo_root / ".env")
+    load_dotenv(repo_root / ".env", override=True)
 
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
