@@ -43,11 +43,14 @@ Uses `common/connectors/crawler.py` (already built). Iterates pages from the `pa
 | `missing_canonical` | medium | no canonical tag |
 | `canonical_mismatch` | high | canonical URL ≠ final rendered URL |
 | `canonical_external` | medium | canonical points to different origin |
-| `missing_alt_text` | medium | any image lacks alt; details has count + examples |
+| `missing_alt_text` | medium | any real image (excluding `data:` placeholders) lacks alt; details has count + examples |
 | `thin_content` | medium | word_count below page-type-aware threshold |
 | `missing_schema` | low | no JSON-LD AND no microdata |
+| `invalid_schema` | medium | known JSON-LD `@type` is missing schema.org required fields (e.g. `Organization` without `url`, `FAQPage` without `mainEntity`) |
 | `noindex_meta` | high | noindex on home/pillar/service page |
 | `redirect_chain_too_long` | medium | > 2 redirects in chain |
+| `duplicate_title` (post-pass) | high | another page in the same origin has the same title (case-insensitive). Details list up to 10 other URLs. |
+| `duplicate_meta_description` (post-pass) | medium | another page in the same origin has the same meta description |
 
 ### Thin-content thresholds (word count by page_type)
 
@@ -66,7 +69,8 @@ Uses `common/connectors/crawler.py` (already built). Iterates pages from the `pa
 - Cadence-aware: skips pages whose `last_audited` is within `--cadence` days (default 7). Use `--all` to force.
 - One issue per (url, issue_type). Re-running refreshes `details` (counts can change) rather than duplicating.
 - Auto-resolves issues that are no longer triggered.
-- Updates `pages.last_audited = now()` for every page audited.
+- Persists audit-time metadata to `pages` for every successful audit: `title`, `meta_description`, `canonical_url`, `lang`, `word_count`, `last_audited`. This data powers the cross-page duplicate detectors and is available for ad-hoc SQL queries.
+- Cross-page duplicate post-pass: after every audited page's metadata is committed, the auditor compares newly-audited titles + meta descriptions against ALL pages in the same origin (case-insensitive) and emits `duplicate_title` / `duplicate_meta_description` issues. Auto-resolves when the duplicate clears.
 - Logs to `agent_runs` with full issue counts in metadata.
 
 ### Command

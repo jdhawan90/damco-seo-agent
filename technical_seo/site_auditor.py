@@ -111,6 +111,10 @@ SEVERITY = {
     "missing_schema":             "low",
     "noindex_meta":               "high",
     "redirect_chain_too_long":    "medium",
+    "invalid_schema":             "medium",
+    # Cross-page detectors (run as a post-pass after per-page audit completes)
+    "duplicate_title":              "high",
+    "duplicate_meta_description":   "medium",
 }
 
 
@@ -180,14 +184,23 @@ def detect_canonical_issues(r: CrawlResult) -> list[dict]:
 
 
 def detect_alt_text_issues(r: CrawlResult) -> list[dict]:
+    """
+    Flag images missing alt text. Excludes `data:` URIs (typically lazy-load
+    placeholder SVGs that get swapped client-side — not real images requiring
+    alt) so the count reflects real accessibility/SEO gaps.
+    """
     if not r.images:
         return []
-    missing = [i for i in r.images if not i.get("alt")]
+    # Real images only — skip placeholder data: URIs.
+    real_images = [i for i in r.images if not (i.get("src") or "").startswith("data:")]
+    if not real_images:
+        return []
+    missing = [i for i in real_images if not i.get("alt")]
     if not missing:
         return []
     return [_issue("missing_alt_text", {
         "missing_count":  len(missing),
-        "total_images":   len(r.images),
+        "total_images":   len(real_images),
         "examples":       [i["src"] for i in missing[:5]],
     })]
 
@@ -206,9 +219,80 @@ def detect_thin_content(r: CrawlResult, page_type: str | None) -> list[dict]:
 
 
 def detect_schema_issues(r: CrawlResult) -> list[dict]:
-    if r.schema_jsonld or r.has_microdata:
-        return []
-    return [_issue("missing_schema", {})]
+    """
+    Two checks:
+      1. missing_schema — no JSON-LD AND no microdata
+      2. invalid_schema — known @types are missing required fields per
+         schema.org. Only validates types we explicitly model; other types
+         pass through silently.
+    """
+    if not r.schema_jsonld and not r.has_microdata:
+        return [_issue("missing_schema", {})]
+
+    # Validate known types in JSON-LD blocks.
+    issues: list[dict] = []
+    validation_problems: list[dict] = []
+    for block in r.schema_jsonld:
+        # Blocks can use @graph for multiple entities, or be a single entity.
+        entities = block.get("@graph") if isinstance(block, dict) and "@graph" in block else [block]
+        for entity in entities or []:
+            if not isinstance(entity, dict):
+                continue
+            problems = _validate_schema_entity(entity)
+            if problems:
+                validation_problems.extend(problems)
+
+    if validation_problems:
+        issues.append(_issue("invalid_schema", {
+            "problems":      validation_problems[:20],
+            "problem_count": len(validation_problems),
+        }))
+    return issues
+
+
+# Required-field map per schema.org @type. Conservative — only common types
+# we'd expect to encounter on Damco's properties. Field names follow
+# schema.org's casing.
+SCHEMA_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+    "Organization":      ("name", "url"),
+    "WebPage":           ("name",),
+    "WebSite":           ("name", "url"),
+    "BreadcrumbList":    ("itemListElement",),
+    "Service":           ("name",),
+    "Product":           ("name",),
+    "Article":           ("headline", "author"),
+    "BlogPosting":       ("headline", "author"),
+    "FAQPage":           ("mainEntity",),
+    "Question":          ("name", "acceptedAnswer"),
+    "Answer":            ("text",),
+    "Person":            ("name",),
+    "ProfessionalService": ("name",),
+    "LocalBusiness":     ("name", "address"),
+    "Event":             ("name", "startDate"),
+}
+
+
+def _validate_schema_entity(entity: dict) -> list[dict]:
+    """Returns list of {entity_type, missing_field} problems for one @type entity."""
+    raw_type = entity.get("@type")
+    if not raw_type:
+        return []  # entities without @type can't be validated
+
+    # @type may be a string or a list (e.g. ["Organization", "LocalBusiness"]).
+    types = raw_type if isinstance(raw_type, list) else [raw_type]
+    problems: list[dict] = []
+    for t in types:
+        if not isinstance(t, str):
+            continue
+        required = SCHEMA_REQUIRED_FIELDS.get(t)
+        if not required:
+            continue
+        for field in required:
+            value = entity.get(field)
+            # "Missing" = key absent OR value is falsy/empty
+            if value is None or value == "" or value == [] or value == {}:
+                problems.append({"entity_type": t, "missing_field": field})
+    return problems
 
 
 def detect_indexability_issues(r: CrawlResult, page_type: str | None) -> list[dict]:
@@ -327,6 +411,117 @@ def open_or_update_issue(cur, url: str, issue: dict) -> str:
     return "updated"
 
 
+def detect_cross_page_duplicates(cur, urls_audited: set[str]) -> dict:
+    """
+    Post-pass: find pages with duplicate titles or meta descriptions within
+    the same origin and open issues on each affected URL.
+
+    Returns dict with: dup_title_n, dup_meta_n, inserted, updated, current_open.
+    """
+    out = {
+        "dup_title_n":  0,
+        "dup_meta_n":   0,
+        "inserted":     0,
+        "updated":      0,
+        "current_open": set(),
+    }
+
+    if not urls_audited:
+        return out
+
+    # Duplicate titles, per origin, considering ALL pages (not just
+    # newly-audited ones) so we catch dupes between a new audit and an
+    # existing record.
+    cur.execute(
+        """
+        WITH all_pages AS (
+            SELECT url, title,
+                   regexp_replace(url, '^(https?://[^/]+).*$', '\\1') AS origin
+              FROM pages
+             WHERE title IS NOT NULL
+        ),
+        dup_keys AS (
+            SELECT origin, lower(title) AS title_key
+              FROM all_pages
+             GROUP BY origin, lower(title)
+            HAVING count(*) > 1
+        )
+        SELECT a.url, a.title,
+               (SELECT array_agg(a2.url ORDER BY a2.url)
+                  FROM all_pages a2
+                 WHERE a2.origin = a.origin
+                   AND lower(a2.title) = lower(a.title)
+                   AND a2.url <> a.url) AS other_urls
+          FROM all_pages a
+          JOIN dup_keys d
+            ON d.origin = a.origin
+           AND d.title_key = lower(a.title)
+         WHERE a.url = ANY(%s)
+        """,
+        (list(urls_audited),),
+    )
+    for row in cur.fetchall():
+        url      = row[0] if not isinstance(row, dict) else row["url"]
+        title    = row[1] if not isinstance(row, dict) else row["title"]
+        others   = row[2] if not isinstance(row, dict) else row["other_urls"]
+        issue = {
+            "issue_type": "duplicate_title",
+            "severity":   SEVERITY["duplicate_title"],
+            "details": {"title": title, "duplicate_count": 1 + len(others or []),
+                        "other_urls": list(others or [])[:10]},
+        }
+        outcome = open_or_update_issue(cur, url, issue)
+        out["inserted" if outcome == "inserted" else "updated"] += 1
+        out["current_open"].add((url, "duplicate_title"))
+        out["dup_title_n"] += 1
+
+    # Duplicate meta descriptions, same logic.
+    cur.execute(
+        """
+        WITH all_pages AS (
+            SELECT url, meta_description,
+                   regexp_replace(url, '^(https?://[^/]+).*$', '\\1') AS origin
+              FROM pages
+             WHERE meta_description IS NOT NULL
+        ),
+        dup_keys AS (
+            SELECT origin, lower(meta_description) AS md_key
+              FROM all_pages
+             GROUP BY origin, lower(meta_description)
+            HAVING count(*) > 1
+        )
+        SELECT a.url, a.meta_description,
+               (SELECT array_agg(a2.url ORDER BY a2.url)
+                  FROM all_pages a2
+                 WHERE a2.origin = a.origin
+                   AND lower(a2.meta_description) = lower(a.meta_description)
+                   AND a2.url <> a.url) AS other_urls
+          FROM all_pages a
+          JOIN dup_keys d
+            ON d.origin = a.origin
+           AND d.md_key = lower(a.meta_description)
+         WHERE a.url = ANY(%s)
+        """,
+        (list(urls_audited),),
+    )
+    for row in cur.fetchall():
+        url    = row[0] if not isinstance(row, dict) else row["url"]
+        md     = row[1] if not isinstance(row, dict) else row["meta_description"]
+        others = row[2] if not isinstance(row, dict) else row["other_urls"]
+        issue = {
+            "issue_type": "duplicate_meta_description",
+            "severity":   SEVERITY["duplicate_meta_description"],
+            "details": {"meta_description": md, "duplicate_count": 1 + len(others or []),
+                        "other_urls": list(others or [])[:10]},
+        }
+        outcome = open_or_update_issue(cur, url, issue)
+        out["inserted" if outcome == "inserted" else "updated"] += 1
+        out["current_open"].add((url, "duplicate_meta_description"))
+        out["dup_meta_n"] += 1
+
+    return out
+
+
 def resolve_stale_issues(cur, urls_audited: set[str], current_open: set[tuple[str, str]]) -> int:
     """
     For each URL we audited this run, any open issue of a type we own that is
@@ -356,7 +551,25 @@ def resolve_stale_issues(cur, urls_audited: set[str], current_open: set[tuple[st
     return resolved
 
 
+def update_page_audit_fields(cur, url: str, r: CrawlResult) -> None:
+    """Persist audit-time metadata to `pages` (migration 006) + bump last_audited."""
+    cur.execute(
+        """
+        UPDATE pages
+           SET title            = %s,
+               meta_description = %s,
+               canonical_url    = %s,
+               lang             = %s,
+               word_count       = %s,
+               last_audited     = now()
+         WHERE url = %s
+        """,
+        (r.title, r.meta_description, r.canonical, r.lang, r.word_count, url),
+    )
+
+
 def update_last_audited(cur, url: str) -> None:
+    """For pages that errored — only bump the timestamp."""
     cur.execute("UPDATE pages SET last_audited = now() WHERE url = %s", (url,))
 
 
@@ -435,8 +648,20 @@ def write_results(results: list[tuple[dict, CrawlResult]], dry_run: bool) -> dic
                     counters["issue_counts_by_type"].get(issue["issue_type"], 0) + 1
                 current_open.add((url, issue["issue_type"]))
 
-            update_last_audited(cur, url)
+            update_page_audit_fields(cur, url, r)
             conn.commit()
+
+        # Cross-page post-pass: duplicate titles + meta descriptions. Runs
+        # after every per-page row is persisted so we get a consistent view.
+        cross = detect_cross_page_duplicates(cur, urls_audited)
+        if cross["dup_title_n"]:
+            counters["issue_counts_by_type"]["duplicate_title"] = cross["dup_title_n"]
+        if cross["dup_meta_n"]:
+            counters["issue_counts_by_type"]["duplicate_meta_description"] = cross["dup_meta_n"]
+        counters["issues_inserted"] += cross["inserted"]
+        counters["issues_updated"]  += cross["updated"]
+        current_open |= cross["current_open"]
+        conn.commit()
 
         counters["issues_resolved"] = resolve_stale_issues(cur, urls_audited, current_open)
         conn.commit()

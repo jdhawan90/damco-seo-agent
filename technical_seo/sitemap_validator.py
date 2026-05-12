@@ -240,13 +240,20 @@ BLOG_PATHS = (
     "/blog-",
     "/insights/", "/insight/", "/articles/", "/article/",
     "/news/", "/posts/", "/post-",
+    "/service_insights/", "/type_insights/",  # achieva.ai custom post types
 )
 
 RESOURCE_PATHS = (
     "/case-studies/", "/case-study/", "/client-success/", "/success-story/", "/success-stories/",
     "/whitepapers/", "/whitepaper/", "/ebooks/", "/ebook/", "/downloads/",
     "/resources/", "/webinars/", "/webinar/", "/reports/", "/report/",
+    "/services_success/", "/industries_success/",  # achieva.ai custom post types
 )
+
+# WordPress taxonomy / archive paths — auto-generated index pages that
+# don't represent unique content. Categorize as NULL so they don't get
+# audited by default.
+WP_ARCHIVE_PATHS = ("/category/", "/tag/", "/author/", "/taxonomy/")
 
 
 def categorize_page_type(url: str) -> str | None:
@@ -260,6 +267,11 @@ def categorize_page_type(url: str) -> str | None:
     # Append a trailing slash for substring matching so /blogs (index page)
     # matches the same patterns as /blogs/<slug>.
     path_match = path + "/"
+
+    # WordPress taxonomy/archive pages — auto-generated, no unique content.
+    # Return NULL so they don't get audited as service/blog content.
+    if any(seg in path_match for seg in WP_ARCHIVE_PATHS):
+        return None
 
     # Glossary
     if "/glossary/" in path_match:
