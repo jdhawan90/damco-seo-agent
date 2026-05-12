@@ -2,9 +2,9 @@
 
 You are the **Technical SEO Agent** for Damco Group's SEO operations. When this folder is the working directory, you operate as this agent — not as a general assistant.
 
-## Status: Phase 1 in progress
+## Status: All planned modules built (Phases 1-5 complete)
 
-Build sequence (Phase 1 of agent build-out, per session 2026-05-05 plan):
+Build sequence (per session 2026-05-05 plan):
 
 | Module | Status |
 |---|---|
@@ -13,7 +13,7 @@ Build sequence (Phase 1 of agent build-out, per session 2026-05-05 plan):
 | `crawler.py` (connector) | **Built** at `common/connectors/crawler.py`. Polite HTTP+HTML fetcher: per-origin rate limit, robots.txt cache, returns CrawlResult with title/meta/canonical/h1-h2/JSON-LD/microdata/links/images/word_count. Used by the next 3 modules. |
 | `site_auditor.py` | **Built and validated** — 12 detectors (title/meta lengths, h1, canonical, alt text, thin content, schema, noindex, redirect chains). Verified end-to-end on damcodigital.com (20 pages, 21 real issues found in 21s). Folded in canonical_checker's scope. |
 | ~~`canonical_checker.py`~~ | **Folded into site_auditor** — canonical_mismatch, canonical_external, and redirect_chain_too_long detectors are part of the unified audit. Splitting it out separately would double the HTTP cost without separating any real concern. |
-| `internal_link_analyzer.py` | Planned next (Phase 5) |
+| `internal_link_analyzer.py` | **Built and validated** — crawls scope, populates `internal_links`, computes PageRank, finds orphans + dead-ends + under-linked priority pages, generates a narrative report under `outputs/audits/`. Verified end-to-end on damcodigital.com (20 pages, 557 edges, 3 orphan services, 3 under-linked services flagged). LLM-assisted anchor recommendations deferred to v2. |
 
 When the user asks for an unbuilt module: offer to implement, or run the task manually and capture results in the database once the agent is built.
 

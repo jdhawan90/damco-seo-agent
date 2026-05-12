@@ -15,7 +15,7 @@ Commands assume repo root as working directory.
 | "run the site audit", "audit pages", "find on-page issues", "title/meta/h1 problems", "missing alt text", "redirect chains", "canonical issues" | [1. Site audit](#1-site-audit) | **Available** |
 | "CWV", "Core Web Vitals", "page speed check" | [2. CWV monitor](#2-cwv-monitor) | **Available** |
 | "validate sitemap", "discover pages", "find broken sitemap URLs" | [3. Sitemap / robots validation](#3-sitemap--robots-validation) | **Available** |
-| "internal linking recommendations", "link equity flow" | [4. Internal link analysis](#4-internal-link-analysis) | Planned |
+| "internal linking recommendations", "link equity flow", "orphan pages", "PageRank", "which pages need more inbound links" | [4. Internal link analysis](#4-internal-link-analysis) | **Available** |
 | ~~5. Canonical + redirect check~~ | -- | Folded into Site audit |
 | "show open technical issues", "what's broken right now" | [6. Query: open issues](#6-query-open-issues) | Available |
 | "CWV trends over time" | [7. Query: CWV history](#7-query-cwv-history) | Available |
@@ -207,20 +207,70 @@ python -m technical_seo.sitemap_validator --dry-run          # validate without 
 
 ## 4. Internal link analysis
 
-**Planned module:** `internal_link_analyzer.py`
+**Module:** `internal_link_analyzer.py` — **Available now.**
 
-**Behavior when built:**
-- Uses `internal_links` table populated by the site crawler.
-- Computes PageRank-style link equity flow across the site graph.
-- Identifies pillar pages that could use more incoming internal links from blog posts.
-- Produces a ranked list of (source_url, target_url, anchor) recommendations.
+Self-contained: crawls all in-scope pages via the shared crawler connector, extracts internal `<a>` tags, populates the `internal_links` table, computes PageRank-style equity, and surfaces three classes of finding.
 
-**LLM-assisted:** Yes — uses `CLAUDE_MODEL_DEFAULT` to generate natural anchor text and evaluate topical relevance of source pages.
+### What gets flagged
 
-**Planned command:**
+| Issue type | Severity | Trigger |
+|---|---|---|
+| `orphan_page` | medium | priority page (home/pillar/service) with 0 inbound internal links |
+| `dead_end_page` | low | page with 0 outbound internal links |
+| `underlinked_pillar` | high | pillar page with < 5 inbound internal links |
+| `underlinked_service` | medium | service page with < 3 inbound internal links |
+
+### Outputs
+
+- **`internal_links` table** — UPSERT (UNIQUE on source+target+anchor). History preserved.
+- **`technical_issues` table** — one issue per (url, type), auto-resolves when no longer triggered.
+- **Narrative report** — `outputs/audits/internal_link_report_<date>[_<domain>].md` containing:
+  - Graph stats (nodes, edges, avg outbound)
+  - Top 10 pages by PageRank in scope
+  - Orphan list (priority-type breakdown)
+  - Dead-end list
+  - Under-linked priority pages with **suggested source pages** (top high-PR pages in the same origin that don't currently link there)
+
+### URL normalization
+
+Internal-link rows normalize URLs aggressively to dedupe the graph:
+- Lowercase scheme + host
+- Strip trailing slash (except for root `/`)
+- Strip URL fragments
+- Default ports dropped
+
+Path case preserved (some servers are case-sensitive on path).
+
+### LLM-assisted recommendations
+
+**Deferred to v2.** Rule-based source-page suggestions (top high-PR pages that don't link to the target yet) are already in the report. LLM-assisted natural anchor-text generation + topical-relevance scoring will be a future enhancement gated behind a `--with-recommendations` flag and `CLAUDE_MODEL_DEFAULT`.
+
+### Command
+
 ```bash
-python -m technical_seo.internal_link_analyzer --target-pillar "AI Agent Development"
+# Default: all 3 domains, page_types = home/pillar/service
+python -m technical_seo.internal_link_analyzer
+
+# One domain
+python -m technical_seo.internal_link_analyzer --domain damcogroup.com
+
+# Wider scope — include blog + resource pages as graph nodes too
+python -m technical_seo.internal_link_analyzer --page-types home,pillar,service,blog,resource
+
+# Re-analyze the existing graph without re-crawling
+python -m technical_seo.internal_link_analyzer --skip-crawl
+
+# Dry run — analyze but don't write
+python -m technical_seo.internal_link_analyzer --dry-run
 ```
+
+### Cost / time
+
+- Free (HTTP only).
+- 4 parallel workers, 1 req/sec/origin rate limit.
+- damcodigital.com (20 pages): ~20s validated. 557 edges in graph.
+- achieva.ai (~15 default-scope pages): ~15s estimated.
+- damcogroup.com (~227 default-scope pages): ~4-5 min estimated.
 
 ---
 
