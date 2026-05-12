@@ -287,13 +287,17 @@ def categorize_page_type(url: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def upsert_page(cur, *, url: str, page_type: str | None) -> None:
+    """
+    Discovery only — don't touch last_audited. site_auditor is the writer
+    of that column (discovery via sitemap is NOT an audit). The `updated_at`
+    trigger on `pages` already records when this row was last touched.
+    """
     cur.execute(
         """
-        INSERT INTO pages (url, page_type, last_audited)
-        VALUES (%s, %s, now())
+        INSERT INTO pages (url, page_type)
+        VALUES (%s, %s)
         ON CONFLICT (url) DO UPDATE SET
-            page_type    = COALESCE(pages.page_type, EXCLUDED.page_type),
-            last_audited = EXCLUDED.last_audited
+            page_type = COALESCE(pages.page_type, EXCLUDED.page_type)
         """,
         (url, page_type),
     )

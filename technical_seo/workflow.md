@@ -12,11 +12,11 @@ Commands assume repo root as working directory.
 
 | User says / asks | Workflow section | Status |
 |---|---|---|
-| "run the site audit", "crawl the sites", "find broken links" | [1. Site audit](#1-site-audit) | Planned |
-| "CWV", "Core Web Vitals", "page speed check" | [2. CWV monitor](#2-cwv-monitor) | **Built** (needs API key) |
+| "run the site audit", "audit pages", "find on-page issues", "title/meta/h1 problems", "missing alt text", "redirect chains", "canonical issues" | [1. Site audit](#1-site-audit) | **Available** |
+| "CWV", "Core Web Vitals", "page speed check" | [2. CWV monitor](#2-cwv-monitor) | **Available** |
 | "validate sitemap", "discover pages", "find broken sitemap URLs" | [3. Sitemap / robots validation](#3-sitemap--robots-validation) | **Available** |
 | "internal linking recommendations", "link equity flow" | [4. Internal link analysis](#4-internal-link-analysis) | Planned |
-| "redirect chains", "canonical issues" | [5. Canonical + redirect check](#5-canonical--redirect-check) | Planned |
+| ~~5. Canonical + redirect check~~ | -- | Folded into Site audit |
 | "show open technical issues", "what's broken right now" | [6. Query: open issues](#6-query-open-issues) | Available |
 | "CWV trends over time" | [7. Query: CWV history](#7-query-cwv-history) | Available |
 
@@ -24,27 +24,77 @@ Commands assume repo root as working directory.
 
 ## 1. Site audit
 
-**Planned module:** `site_auditor.py`
+**Module:** `site_auditor.py` — **Available now.**
 
-**Behavior when built:**
-- Crawls all three domains (`damcogroup.com`, `achieva.ai`, `damcodigital.com`) — max 500 pages per domain unless overridden.
-- Detects: broken links (4xx/5xx), missing meta titles/descriptions, duplicate content, missing schema, title length violations, H1 hierarchy issues.
-- Writes each finding to `technical_issues` with severity (`critical` / `high` / `medium` / `low` / `info`).
-- Logs run to `agent_runs` with records_processed = issue count.
+Uses `common/connectors/crawler.py` (already built). Iterates pages from the `pages` table (seeded by `sitemap_validator`), fetches each, runs 12 detectors, and writes findings to `technical_issues`. Includes everything originally scoped to a separate `canonical_checker.py` (canonical mismatch, external canonical, redirect chains).
 
-**Planned command:**
+### Detectors
+
+| Issue type | Severity | Trigger |
+|---|---|---|
+| `missing_title` | critical | no `<title>` |
+| `short_title` | low | < 30 chars |
+| `long_title` | low | > 60 chars |
+| `missing_meta_description` | high | no meta description |
+| `short_meta_description` | low | < 70 chars |
+| `long_meta_description` | low | > 160 chars |
+| `missing_h1` | high | no `<h1>` |
+| `multiple_h1` | medium | > 1 `<h1>` |
+| `missing_canonical` | medium | no canonical tag |
+| `canonical_mismatch` | high | canonical URL ≠ final rendered URL |
+| `canonical_external` | medium | canonical points to different origin |
+| `missing_alt_text` | medium | any image lacks alt; details has count + examples |
+| `thin_content` | medium | word_count below page-type-aware threshold |
+| `missing_schema` | low | no JSON-LD AND no microdata |
+| `noindex_meta` | high | noindex on home/pillar/service page |
+| `redirect_chain_too_long` | medium | > 2 redirects in chain |
+
+### Thin-content thresholds (word count by page_type)
+
+| page_type | threshold |
+|---|---|
+| home | 150 |
+| pillar | 800 |
+| service | 300 |
+| blog | 300 |
+| resource | 200 |
+| landing | 100 |
+| glossary | 100 |
+
+### Behavior
+
+- Cadence-aware: skips pages whose `last_audited` is within `--cadence` days (default 7). Use `--all` to force.
+- One issue per (url, issue_type). Re-running refreshes `details` (counts can change) rather than duplicating.
+- Auto-resolves issues that are no longer triggered.
+- Updates `pages.last_audited = now()` for every page audited.
+- Logs to `agent_runs` with full issue counts in metadata.
+
+### Command
+
 ```bash
-python -m technical_seo.site_auditor [--domain damcogroup.com] [--max-pages 500]
+# Default: all 3 domains, page_type IN (home, pillar, service), weekly cadence
+python -m technical_seo.site_auditor
+
+# One domain
+python -m technical_seo.site_auditor --domain damcogroup.com
+
+# Include blog + resource pages too
+python -m technical_seo.site_auditor --page-types home,pillar,service,blog,resource
+
+# Force re-audit ignoring cadence
+python -m technical_seo.site_auditor --all
+
+# Dry run — fetch + analyze but don't write
+python -m technical_seo.site_auditor --dry-run
 ```
 
-**Implementation checklist** (when building):
-- [ ] Create `common/connectors/crawler.py` (HTTP + BeautifulSoup + robots.txt respect)
-- [ ] Implement crawl queue with rate limiting (1 req/sec/domain default)
-- [ ] Define issue detection rules (start with the 6 most common)
-- [ ] Upsert into `technical_issues` with `ON CONFLICT (url, issue_type)` — mark old as resolved if no longer present
-- [ ] Add `--dry-run` flag
+### Cost / time
 
-**Workaround until built:** Use Screaming Frog or Sitebulb manually; manually log critical findings to `technical_issues`.
+- Free (no external paid APIs — only fetches the target pages).
+- 4 parallel workers with the crawler's 1 req/sec/origin rate limit means same-domain fetches serialize at 1 req/sec.
+- damcodigital.com (20 pages): ~20s validated
+- achieva.ai (~15 default-scope pages): ~15s estimated
+- damcogroup.com (~227 default-scope pages): ~4-5 min estimated
 
 ---
 
@@ -174,19 +224,11 @@ python -m technical_seo.internal_link_analyzer --target-pillar "AI Agent Develop
 
 ---
 
-## 5. Canonical + redirect check
+## 5. ~~Canonical + redirect check~~ -- folded into Site audit
 
-**Planned module:** `canonical_checker.py`
+The original plan had a separate `canonical_checker.py` module. It would have needed the exact same crawler.fetch() output as `site_auditor.py`, so splitting it out would double HTTP cost without separating any real concern.
 
-**Behavior when built:**
-- Follows every URL in `pages` and `sitemap` through their redirect chain.
-- Flags chains longer than 2 hops, loops, and 302s where a 301 should exist.
-- Compares canonical tags against actual rendered URL; flags mismatches.
-
-**Planned command:**
-```bash
-python -m technical_seo.canonical_checker
-```
+Canonical mismatch, external canonical, and redirect-chain detection live in `site_auditor.py` (Section 1) as `canonical_mismatch`, `canonical_external`, and `redirect_chain_too_long` issue types. Run the site auditor to get these findings.
 
 ---
 

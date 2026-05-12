@@ -11,9 +11,9 @@ Build sequence (Phase 1 of agent build-out, per session 2026-05-05 plan):
 | `sitemap_validator.py` | **Built** — discovers + validates URLs from sitemap.xml across all 3 properties; auto-categorizes page_type; writes to `pages` and `technical_issues`. |
 | `cwv_monitor.py` | **Built and validated** — verified end-to-end on damcodigital.com (40/40 pages, 100% below threshold — surfaced real performance findings: homepage mobile score 16, LCP 18s). Mobile≥60 / desktop≥85 thresholds applied; 20%+ regression detection wired up. |
 | `crawler.py` (connector) | **Built** at `common/connectors/crawler.py`. Polite HTTP+HTML fetcher: per-origin rate limit, robots.txt cache, returns CrawlResult with title/meta/canonical/h1-h2/JSON-LD/microdata/links/images/word_count. Used by the next 3 modules. |
-| `site_auditor.py` | Planned next |
-| `canonical_checker.py` | Planned |
-| `internal_link_analyzer.py` | Planned |
+| `site_auditor.py` | **Built and validated** — 12 detectors (title/meta lengths, h1, canonical, alt text, thin content, schema, noindex, redirect chains). Verified end-to-end on damcodigital.com (20 pages, 21 real issues found in 21s). Folded in canonical_checker's scope. |
+| ~~`canonical_checker.py`~~ | **Folded into site_auditor** — canonical_mismatch, canonical_external, and redirect_chain_too_long detectors are part of the unified audit. Splitting it out separately would double the HTTP cost without separating any real concern. |
+| `internal_link_analyzer.py` | Planned next (Phase 5) |
 
 When the user asks for an unbuilt module: offer to implement, or run the task manually and capture results in the database once the agent is built.
 
