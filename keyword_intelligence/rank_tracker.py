@@ -47,7 +47,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.config import settings
 from common.database import connection, fetch_all, record_agent_run
-from common.connectors.dataforseo import get_serp_rankings, DataForSEOError
+from common.connectors.dataforseo import get_serp_rankings, drain_ready_serp_tasks, DataForSEOError
+
+
+# Observed DataForSEO SERP pricing on 2026-05-15 (location_code=2840, depth=100):
+# standard queue tasks cost $0.00465 each (task_post + automatic task_get).
+# Live queue is approximately 3x ($0.012).
+# Update these if the API price changes.
+COST_PER_TASK_STANDARD = 0.00465
+COST_PER_TASK_LIVE     = 0.012
 
 
 logger = logging.getLogger("rank_tracker")
@@ -788,22 +796,70 @@ def print_summary(results: list[dict], run_date: date) -> None:
 # ---------------------------------------------------------------------------
 
 def run(offering: str | None = None, queue: str = "standard", dry_run: bool = False,
-        skip_gsc: bool = False, gsc_days: int = 14, force_all: bool = False) -> dict:
+        skip_gsc: bool = False, gsc_days: int = 14, force_all: bool = False,
+        drain_ready: bool = False) -> dict:
     start_time = time.monotonic()
     run_date = date.today()
 
-    keywords = load_keywords(offering, only_due=not force_all)
-    if not keywords:
-        msg = "No keywords are due for a snapshot"
-        if offering: msg += f" (offering={offering})"
-        if force_all: msg = "No active keywords found"
-        logger.warning(msg)
-        return {"status": "skipped", "reason": "no keywords"}
+    if drain_ready:
+        # Recovery mode: pull tasks already completed in DataForSEO's ready
+        # queue (we paid for them but never fetched). No new task_post
+        # submissions, no fresh cost.
+        logger.info("DRAIN MODE — pulling ready tasks from DataForSEO (no new submissions)")
+        drained = drain_ready_serp_tasks()
+        logger.info("Drained %d task result(s) from queue", len(drained))
 
-    logger.info("Tracking %d keywords (queue=%s, date=%s, force_all=%s)",
-                len(keywords), queue, run_date, force_all)
+        # Match each drained result to a keyword_id by keyword text.
+        # Load ALL active keywords (across offerings) since the drain
+        # can include tasks from any earlier submission.
+        all_kw = load_keywords(offering=None, only_due=False)
+        kw_text_to_id = {kw["keyword"]: kw for kw in all_kw}
 
-    serp_data = fetch_rankings(keywords, queue)
+        serp_data: dict[int, dict] = {}
+        unmatched_keywords: list[str] = []
+        for serp in drained:
+            kw_text = serp.get("keyword") or ""
+            match = kw_text_to_id.get(kw_text)
+            if match is None:
+                unmatched_keywords.append(kw_text)
+                continue
+            serp_data[match["id"]] = {
+                "keyword": kw_text,
+                "items":   serp.get("items") or [],
+                "raw":     serp.get("raw"),
+                "error":   None,
+            }
+        if unmatched_keywords:
+            logger.warning(
+                "%d drained results didn't match any active keyword in our DB "
+                "(likely from prior test runs or different keyword versions). "
+                "Examples: %s",
+                len(unmatched_keywords), unmatched_keywords[:3],
+            )
+
+        # If an offering filter was passed, restrict the processed keywords.
+        keywords = [
+            kw for kw in all_kw
+            if kw["id"] in serp_data and (offering is None or kw["offering"] == offering)
+        ]
+        if not keywords:
+            logger.warning("Drain returned 0 matched keywords%s",
+                           f" for offering={offering}" if offering else "")
+            return {"status": "skipped", "reason": "no drained results matched"}
+        logger.info("Processing %d drained keyword(s)%s",
+                    len(keywords), f" filtered to offering={offering}" if offering else "")
+    else:
+        keywords = load_keywords(offering, only_due=not force_all)
+        if not keywords:
+            msg = "No keywords are due for a snapshot"
+            if offering: msg += f" (offering={offering})"
+            if force_all: msg = "No active keywords found"
+            logger.warning(msg)
+            return {"status": "skipped", "reason": "no keywords"}
+
+        logger.info("Tracking %d keywords (queue=%s, date=%s, force_all=%s)",
+                    len(keywords), queue, run_date, force_all)
+        serp_data = fetch_rankings(keywords, queue)
 
     # Per-keyword writes
     results: list[dict] = []
@@ -917,7 +973,10 @@ def run(offering: str | None = None, queue: str = "standard", dry_run: bool = Fa
     print(f"  Events emitted:       {total_events}")
     print(f"  Competitors touched:  {len(total_touched_cids)}")
     print(f"  Duration:             {duration:.1f}s")
-    print(f"  Estimated cost:       ~${total * 0.0006:.4f} (standard queue)")
+    per_task = COST_PER_TASK_LIVE if queue == "live" else COST_PER_TASK_STANDARD
+    cost_note = ("$0.00 — drain mode (pulling already-paid-for results)" if drain_ready
+                 else f"~${total * per_task:.4f}  (queue: {queue}, ${per_task}/task)")
+    print(f"  Estimated cost:       {cost_note}")
     print()
 
     # GSC enrichment
@@ -953,6 +1012,10 @@ def main() -> None:
                         help="Fetch rankings but don't write to DB")
     parser.add_argument("--all", dest="force_all", action="store_true",
                         help="Force a snapshot for every active keyword (ignores fortnightly cadence)")
+    parser.add_argument("--drain-ready", dest="drain_ready", action="store_true",
+                        help="Recovery mode: pull all already-completed tasks from DataForSEO's "
+                             "ready queue (no new task_post, no new spend). Useful after a polling "
+                             "timeout left paid-for tasks unfetched. Honors --offering as a filter.")
     parser.add_argument("--skip-gsc", action="store_true",
                         help="Skip GSC enrichment step")
     parser.add_argument("--gsc-days", type=int, default=14,
@@ -967,7 +1030,8 @@ def main() -> None:
     )
 
     run(offering=args.offering, queue=args.queue, dry_run=args.dry_run,
-        skip_gsc=args.skip_gsc, gsc_days=args.gsc_days, force_all=args.force_all)
+        skip_gsc=args.skip_gsc, gsc_days=args.gsc_days, force_all=args.force_all,
+        drain_ready=args.drain_ready)
 
 
 if __name__ == "__main__":
