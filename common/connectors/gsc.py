@@ -32,6 +32,7 @@ import logging
 from pathlib import Path
 from typing import Iterable
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -55,15 +56,29 @@ def _get_credentials() -> Credentials:
     if creds and creds.valid:
         return creds
 
+    # Try a refresh. If the refresh token has been revoked/expired
+    # (Google rotates these for inactive installed apps), fall through to
+    # a fresh OAuth flow instead of crashing.
+    refresh_failed = False
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-    else:
+        try:
+            creds.refresh(Request())
+        except RefreshError as exc:
+            logger.warning("GSC refresh token invalid (%s) — falling back to fresh OAuth flow.", exc)
+            refresh_failed = True
+            creds = None
+
+    if creds is None or refresh_failed:
         secrets_path = Path(settings.GSC_CLIENT_SECRETS_FILE)
         if not secrets_path.exists():
             raise RuntimeError(
                 f"GSC client secrets not found at {secrets_path}. "
                 f"Download OAuth client JSON from Google Cloud Console and save it there."
             )
+        # Best practice: remove stale token before re-auth so a subsequent
+        # crash mid-flow doesn't leave us re-trying the dead one.
+        if refresh_failed and token_path.exists():
+            token_path.unlink()
         flow = InstalledAppFlow.from_client_secrets_file(str(secrets_path), SCOPES)
         # run_local_server opens a browser on the host running this code.
         creds = flow.run_local_server(port=0)
