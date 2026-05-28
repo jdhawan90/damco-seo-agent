@@ -6,7 +6,7 @@ Runbook for the Content Operations Agent. **Not yet implemented** — most secti
 
 | User says / asks | Section | Status |
 |---|---|---|
-| "generate a brief for [keyword/URL]" | [1. Brief generation](#1-brief-generation) | Planned |
+| "generate a brief", "create content briefs from gap_analyzer", "what should writers work on" | [1. Brief generation](#1-brief-generation) | **Available** |
 | "check this content against the brief", "run compliance" | [2. Compliance check](#2-compliance-check) | Planned |
 | "what glossary pages are missing", "definition-intent gaps", "AEO opportunities" | [3. Glossary detection](#3-glossary-detection) | **Available** |
 | "are we over-concentrated on X", "content calendar balance" | [4. Concentration check](#4-concentration-check) | Planned |
@@ -17,23 +17,80 @@ Runbook for the Content Operations Agent. **Not yet implemented** — most secti
 
 ## 1. Brief generation
 
-**Planned module:** `brief_generator.py`
+**Module:** `brief_generator.py` — **Available now.**
 
-**Behavior when built:** takes a target URL (or a set of keyword IDs) and produces a complete SEO brief: primary + secondary keywords with SV, competitor reference URLs, target audience stage, heading outline, internal linking targets, AEO checklist, word count recommendation. Saves the brief JSON to `content_briefs.brief_content` and writes a formatted .docx to `outputs/briefs/`.
+Takes a target keyword (or set of keywords) and emits a complete SEO content brief — the document a writer needs to draft a ranking page. Designed to chain off `competitive_intelligence.gap_analyzer`.
 
-**LLM usage:** `CLAUDE_MODEL_DEFAULT` (sonnet) for narrative sections (intro hook, topic angle, unique POV).
+### Modes
 
-**Planned command:**
+| Flag | Behavior |
+|---|---|
+| `--coverage-gap` | Auto-picks coverage-gap keywords (Damco missing from top 100, ≥1 tracked competitor in top 10), ranked by GSC impressions. The primary mode. |
+| `--keyword-ids 42,43,45` | Manual: brief for these specific keyword IDs |
+| `--offering "AI"` | Restrict coverage-gap pool to one offering |
+| `--limit N` | Cap on coverage-gap briefs per run (default: 10) |
+| `--no-llm` | Force rule-based output (skip Claude even if available) |
+| `--dry-run` | Write markdown brief to disk but skip DB inserts |
+
+### What's in each brief
+
+| Section | How it's built |
+|---|---|
+| Primary keyword + suggested URL | Slug derived from keyword |
+| GSC demand (14d) | clicks, impressions, position from `keyword_rankings` |
+| Audience stage (awareness / consideration / decision) | Rule-based heuristic on keyword wording (cf. "what is X" = awareness, "X pricing" = decision) |
+| Secondary keywords | Lexical-overlap scoring across all keywords in the same offering, ranked by GSC demand |
+| Top 5 competitor reference URLs | From `competitor_rankings` — the SERP we need to outrank |
+| Heading outline | Template skeleton refined by LLM into 6-8 specific H2s |
+| Must-include subtopics + buyer questions | LLM-generated from competitor context |
+| Internal linking suggestions | Topical match against `pages` (audited via site_auditor). Generic tokens like "services" / "solutions" / "company" are explicitly excluded from matching so we don't false-positive on every service page. |
+| Narrative angle (intro hook / topic angle / unique POV) | LLM, with `[PLACEHOLDER]` markers when Anthropic credit isn't available |
+| **AEO checklist** | Hardcoded — present in every brief regardless of LLM availability |
+| Recommended word count | Page-type-aware (service: 1000, pillar: 1500, blog: 800, etc.) |
+
+### Outputs
+
+- **DB:** one `content_briefs` row per brief with `status='draft'`, `brief_content` (JSONB), `target_url`, `file_path`, `keywords_json`
+- **Disk:** `outputs/briefs/<slug>_<date>.md` — writeable markdown brief ready to hand to a writer
+
+### LLM behavior
+
+Uses `common.llm.call_claude` with tier `default` (sonnet). One call per brief (~2k in / ~1.5k out / ~$0.02-0.05). On `LLMUnavailableError`: narrative sections show `[PLACEHOLDER — load Anthropic credit and re-run]` markers; structured sections still populate fully.
+
+### Command
+
 ```bash
-python -m content_operations.brief_generator --keyword-ids 42,43,45 --target-url https://www.damcogroup.com/ai-agent-development
+# Top 10 coverage gaps across all offerings, full LLM enrichment
+python -m content_operations.brief_generator --coverage-gap --limit 10
+
+# Top 5 coverage gaps in AI offering only
+python -m content_operations.brief_generator --coverage-gap --offering "AI" --limit 5
+
+# Manual: specific keyword cluster
+python -m content_operations.brief_generator --keyword-ids 42,43,45
+
+# Rule-based only (no LLM cost / when credit isn't loaded)
+python -m content_operations.brief_generator --coverage-gap --limit 5 --no-llm
+
+# Preview without DB inserts
+python -m content_operations.brief_generator --coverage-gap --limit 3 --dry-run
 ```
 
-**AEO checklist** (always include in every brief):
-- Does the content answer one crisp, extractable question in the first 200 words?
-- Is there a "key facts" section with stats / definitions that AI search can quote?
-- Are there bulleted lists for scannable content?
-- Is the author identified with credentials?
-- Are sources cited inline?
+### Cost
+
+LLM: ~$0.02-0.05 per brief with Sonnet. A 10-brief coverage-gap batch costs ~$0.20-0.50.
+Without `--no-llm` and without Anthropic credit: $0 (rule-based output, `[PLACEHOLDER]` markers in narrative sections).
+
+### Validation (2026-05-28)
+
+- Coverage-gap mode picked the right 3 BPM targets including `data enrichment services` (the keyword we analyzed manually earlier).
+- Brief for `data enrichment services` showed:
+  - GSC demand correctly: 431 impressions, 2 clicks, avg position 29
+  - 8 secondary keywords scored by lexical overlap with the primary
+  - Top 5 competitors: blackbaud.com, snov.io, zapier.com, alation.com, edq.com (matches manual SERP check from earlier session)
+  - AEO checklist with 9 items
+  - Audience stage = consideration (service-class keyword)
+- DB write verified: `content_briefs` row #1 created with `status='draft'`, file_path populated, agent_runs logged.
 
 ---
 

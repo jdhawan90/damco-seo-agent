@@ -9,7 +9,7 @@ Build sequence:
 | Module | Status |
 |---|---|
 | `glossary_detector.py` | **Built and validated** — scans active keywords for definition-intent patterns ("what is X", "X meaning", "X explained", "define X", "X for beginners", etc.); cross-references with existing glossary pages; outputs prioritized markdown + Excel of missing terms ranked by GSC impression demand. Rule-based, no LLM dependency. **Strategic finding from first run: Damco's keyword set is 100% commercial intent — zero definitional terms — which itself is a real SEO gap.** |
-| `brief_generator.py` | Planned (Phase 2) — consumes gap_analyzer output; LLM-heavy. |
+| `brief_generator.py` | **Built and validated** — Takes coverage-gap keywords (or manual `--keyword-ids`), pulls Damco's GSC demand signal, derives secondary keywords by lexical overlap within the offering, classifies audience stage (awareness/consideration/decision), looks up top-5 competitor URLs for the keyword's SERP, suggests topically-relevant internal-link targets from `pages`, and writes both a JSONB row in `content_briefs` and a writable markdown brief. LLM (Sonnet) enriches outline + intro hook + topic angle + unique POV; graceful rule-based fallback when Anthropic credit is unavailable. AEO checklist hardcoded into every brief per the safety rule. |
 | `compliance_checker.py` | Planned. |
 | `concentration_checker.py` | Planned. |
 
