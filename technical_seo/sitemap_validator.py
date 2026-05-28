@@ -59,11 +59,19 @@ DOMAINS = [
     {"domain": "achieva.ai",       "sitemap_url": "https://achieva.ai/sitemap.xml"},
 ]
 
-NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+# Sitemap parsing + walking lives in common/sitemap.py so the
+# competitive_intelligence.content_monitor can reuse it without crossing
+# agent boundaries. fetch_xml / parse_sitemap / collect_urls_from_sitemap
+# are imported from there now.
+from common.sitemap import (
+    fetch_xml,
+    parse_sitemap,
+    collect_urls_from_sitemap,
+    USER_AGENT,
+    REQUEST_TIMEOUT,
+)
 
-USER_AGENT = "DamcoSEOBot/1.0 (+https://www.damcogroup.com/; SEO ops monitoring)"
-REQUEST_TIMEOUT = 15
-RATE_LIMIT_SLEEP = 0.5  # seconds between requests per domain
+RATE_LIMIT_SLEEP = 0.5  # seconds between requests per domain (HEAD/GET validation)
 MAX_REDIRECT_HOPS_OK = 2
 
 # Issue types this module emits.
@@ -75,101 +83,8 @@ ISSUE_TYPES = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Sitemap fetching + parsing
-# ---------------------------------------------------------------------------
-
-def fetch_xml(url: str) -> str | None:
-    """Fetch a sitemap URL and return the XML text. None on failure."""
-    try:
-        r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT)
-        r.raise_for_status()
-        return r.text
-    except requests.RequestException as exc:
-        logger.error("Failed to fetch sitemap %s: %s", url, exc)
-        return None
-
-
-def parse_sitemap(xml_text: str) -> tuple[str, list[str]]:
-    """
-    Returns ('index', [sub_sitemap_urls]) or ('urlset', [page_urls]).
-    Raises ValueError on unparseable XML.
-    """
-    root = ET.fromstring(xml_text)
-    tag = root.tag.split("}")[-1] if "}" in root.tag else root.tag
-    if tag == "sitemapindex":
-        urls = []
-        for s in root.findall("sm:sitemap", NS) or root.findall("sitemap"):
-            loc = s.find("sm:loc", NS) if s.find("sm:loc", NS) is not None else s.find("loc")
-            if loc is not None and loc.text:
-                urls.append(loc.text.strip())
-        return ("index", urls)
-    if tag == "urlset":
-        urls = []
-        for u in root.findall("sm:url", NS) or root.findall("url"):
-            loc = u.find("sm:loc", NS) if u.find("sm:loc", NS) is not None else u.find("loc")
-            if loc is not None and loc.text:
-                urls.append(loc.text.strip())
-        return ("urlset", urls)
-    raise ValueError(f"Unrecognized sitemap root tag: {tag}")
-
-
-def collect_urls_from_sitemap(sitemap_url: str, max_depth: int = 3) -> tuple[list[str], list[str]]:
-    """
-    Recursively walk a sitemap. Returns (page_urls, fetch_errors).
-    fetch_errors is a list of sitemap URLs we couldn't fetch or parse.
-    """
-    page_urls: list[str] = []
-    fetch_errors: list[str] = []
-    seen_sitemaps: set[str] = set()
-
-    def walk(url: str, depth: int) -> None:
-        if depth > max_depth:
-            logger.warning("Max sitemap depth reached at %s", url)
-            return
-        if url in seen_sitemaps:
-            return
-        seen_sitemaps.add(url)
-
-        xml_text = fetch_xml(url)
-        if xml_text is None:
-            fetch_errors.append(url)
-            return
-        try:
-            kind, items = parse_sitemap(xml_text)
-        except ET.ParseError as exc:
-            logger.error("Could not parse sitemap %s: %s", url, exc)
-            fetch_errors.append(url)
-            return
-        except ValueError as exc:
-            logger.error("%s", exc)
-            fetch_errors.append(url)
-            return
-
-        if kind == "index":
-            for sub in items:
-                walk(sub, depth + 1)
-                time.sleep(RATE_LIMIT_SLEEP)
-        else:
-            page_urls.extend(items)
-
-    walk(sitemap_url, depth=0)
-    # Dedupe but preserve order; filter out stray sub-sitemap URLs that ended
-    # up inside a <urlset> by mistake.
-    seen: set[str] = set()
-    unique_pages: list[str] = []
-    skipped_xml = 0
-    for u in page_urls:
-        if u.lower().endswith(".xml"):
-            skipped_xml += 1
-            continue
-        if u not in seen:
-            seen.add(u)
-            unique_pages.append(u)
-    if skipped_xml:
-        logger.info("Skipped %d stray .xml entries inside urlsets (sub-sitemaps mislisted as pages)",
-                    skipped_xml)
-    return unique_pages, fetch_errors
+# Sitemap-fetching utilities live in common/sitemap.py — see top of file
+# for the import.
 
 
 # ---------------------------------------------------------------------------

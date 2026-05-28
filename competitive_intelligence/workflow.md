@@ -8,7 +8,7 @@ Runbook for the Competitive Intelligence Agent. `gap_analyzer.py` is **available
 |---|---|---|
 | "what changed on competitor sites", "competitor page rewrites", "title changes", "new competitor pages", "removed pages" | [1. Competitor monitor](#1-competitor-monitor) | **Available** |
 | "competitor backlinks", "where are they getting links", "outreach prospects", "common referring domains" | [2. Backlink analyzer](#2-backlink-analyzer) | **Built (needs subscription)** |
-| "what are they publishing", "competitor blog tracker" | [3. Content monitor](#3-content-monitor) | Planned |
+| "what are they publishing", "competitor blog tracker", "new competitor pages", "what's itransition adding" | [3. Content monitor](#3-content-monitor) | **Available** |
 | "gap analysis", "what topics are we missing", "where competitors win and we don't", "displacement opportunities", "quick wins" | [4. Gap analyzer](#4-gap-analyzer) | **Available** |
 | "add / remove / mute a competitor", "manage competitor roster" | [5. Competitor roster](#5-competitor-roster) | Available |
 | "show competitor SERP positions for our keywords" | [6. Query: competitor SERPs](#6-query-competitor-serps) | Available |
@@ -155,11 +155,67 @@ Backlinks API is subscription-based, not pay-per-query. Once subscribed, calls a
 
 ## 3. Content monitor
 
-**Planned module:** `content_monitor.py`
+**Module:** `content_monitor.py` — **Available now.**
 
-**Behavior when built:** tracks new URLs indexed under competitor domains (via DataForSEO or Google site:queries), classifies by content type (blog vs. landing), extracts topic, flags anything competing for Damco's target keywords.
+Detects new pages competitors publish, faster than waiting for those pages to surface as new top-10 SERP entries. Catches the moment they publish, not when Google ranks it.
 
-**Planned command:** `python -m competitive_intelligence.content_monitor`
+### How it works
+
+For each tracked competitor (default: `primary` tier):
+1. Discover their sitemap entry point via `common.sitemap.discover_sitemap_urls` (tries `/sitemap.xml`, `/sitemap_index.xml`, `robots.txt` declarations).
+2. Walk the sitemap recursively via `common.sitemap.collect_urls_from_sitemap` (handles `<sitemapindex>`).
+3. Diff current URL set against `competitor_published_urls` (migration 009).
+4. For each genuinely new URL:
+   - INSERT into the manifest with `first_seen = today`
+   - Emit a `competitor_changes` event with `change_type='new_page'`
+   - Bump significance to **0.6** (vs the default 0.4) when the URL path matches a slug of any active Damco keyword. These are the "topical threats" — competitor publishing about your space.
+5. For URLs missing from the new sitemap: mark `is_active=FALSE`. No event emitted (sitemap drop-outs are too noisy to alert on — often reorganizations, not deletions).
+
+### Cadence
+
+Per-URL via `competitor_published_urls.last_seen`. Default 7 days. `--all` forces immediate re-scan.
+
+### Outputs
+
+- `outputs/audits/content_monitor_<date>.md` — narrative report:
+  - Summary: # competitors scanned, # with sitemap, # of new URLs, # keyword-matched
+  - Per-competitor table
+  - **Per-competitor "new URLs detail"** section sorted by # of keyword matches first (most interesting at top)
+
+### Command
+
+```bash
+# Default: primary threats, weekly cadence
+python -m competitive_intelligence.content_monitor
+
+# Wider scope
+python -m competitive_intelligence.content_monitor --threat-tier primary,watch
+
+# One specific competitor
+python -m competitive_intelligence.content_monitor --domain itransition.com
+
+# Force re-scan ignoring cadence
+python -m competitive_intelligence.content_monitor --all
+
+# Dry run — fetch + diff but no DB writes
+python -m competitive_intelligence.content_monitor --dry-run
+```
+
+### Cost
+
+Free — HTTP only (sitemap fetches). Rate-limited per-sitemap-walk by `common.sitemap.RATE_LIMIT_SLEEP` (0.5s between recursive fetches).
+
+### Validation (2026-05-28)
+
+- Scanned `itransition.com`: 1,160 URLs discovered from sitemap; first-run treated all as new.
+- 6 URLs had paths matching Damco-tracked keyword slugs — flagged at significance 0.6:
+  - `/company/news/itransition-becomes-a-salesforce-partner` (Achieva relevance)
+  - `/insurance/policy-management-software` (Insurance)
+  - `/insurance/reinsurance-software` (Insurance)
+  - `/portfolio/claim-management-software` (Insurance)
+  - `/portfolio/data-transformation-salesforce-migration` (Achieva)
+  - `/de/portfolio/datenumwandlung-salesforce-migration` (Achieva)
+- Re-scan with `--all`: 0 new events (diff logic confirmed).
 
 ---
 
