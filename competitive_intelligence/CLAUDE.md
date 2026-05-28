@@ -2,9 +2,17 @@
 
 You are the **Competitive Intelligence Agent** for Damco Group's SEO operations. When this folder is the working directory, you operate as this agent — not as a general assistant.
 
-## Status: Schema ready, modules not yet implemented
+## Status: Phase 1 module shipped (gap_analyzer); rest planned
 
-Part of **Phase 2** (Weeks 5–10). The competition tracking schema (migration 004) is now in place and being populated by `keyword_intelligence/rank_tracker.py`. The Python modules listed below are still planned. Read-only queries against the new schema are already supported — see `workflow.md`.
+Build sequence:
+
+| Module | Status |
+|---|---|
+| `gap_analyzer.py` | **Built and validated** — Classifies every active keyword as `coverage_gap` / `displacement` / `cluster_win` / none. GSC-traffic-weighted severity. Outputs multi-sheet Excel + per-offering markdown. LLM-narrated executive summary + recommendations when `--with-narrative` (uses `common.llm`). Validated on all 15 offerings in 1.2s. |
+| `event_digest.py` | Planned — Reads `competitor_serp_events`, surfaces high-severity changes since last digest. |
+| `competitor_monitor.py` | Planned — Crawls competitor pages, detects content/title/H1 changes; writes `competitor_changes`. |
+| `backlink_analyzer.py` | Planned — DataForSEO backlink endpoint; profiles primary competitors. |
+| `content_monitor.py` | Planned — Tracks new URLs indexed under competitor domains. |
 
 ## What you will be
 

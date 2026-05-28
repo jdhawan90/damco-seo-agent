@@ -1,6 +1,6 @@
 # Competitive Intelligence — Workflow Runbook
 
-Runbook for the Competitive Intelligence Agent. **Most Python modules are not yet implemented** — but the SERP-side schema (migration 004) is in place and queries against it are available now.
+Runbook for the Competitive Intelligence Agent. `gap_analyzer.py` is **available now**; the other modules are still planned. The SERP-side schema (migration 004) is in place and populated with real data.
 
 ## Decision tree
 
@@ -9,7 +9,7 @@ Runbook for the Competitive Intelligence Agent. **Most Python modules are not ye
 | "what changed on competitor sites", "weekly competitor digest" | [1. Competitor monitor](#1-competitor-monitor) | Planned |
 | "competitor backlinks", "where are they getting links" | [2. Backlink analyzer](#2-backlink-analyzer) | Planned |
 | "what are they publishing", "competitor blog tracker" | [3. Content monitor](#3-content-monitor) | Planned |
-| "gap analysis", "what topics are we missing" | [4. Gap analyzer](#4-gap-analyzer) | Planned |
+| "gap analysis", "what topics are we missing", "where competitors win and we don't", "displacement opportunities", "quick wins" | [4. Gap analyzer](#4-gap-analyzer) | **Available** |
 | "add / remove / mute a competitor", "manage competitor roster" | [5. Competitor roster](#5-competitor-roster) | Available |
 | "show competitor SERP positions for our keywords" | [6. Query: competitor SERPs](#6-query-competitor-serps) | Available |
 | "who's competing in the AI offering", "share of voice", "top competitors per offering" | [7. Query: offering rollup](#7-query-offering-rollup) | Available |
@@ -55,11 +55,66 @@ Runbook for the Competitive Intelligence Agent. **Most Python modules are not ye
 
 ## 4. Gap analyzer
 
-**Planned module:** `gap_analyzer.py`
+**Module:** `gap_analyzer.py` — **Available now.**
 
-**Behavior when built:** cross-references competitor page inventory and keyword coverage against Damco's. Uses `CLAUDE_MODEL_DEFAULT` to generate a narrative summary of strategic gaps ("Competitors A, B, C all have a glossary section covering terms X, Y, Z — Damco doesn't").
+Classifies every active keyword by competitive gap type using the populated `competitor_rankings` + `keyword_rankings` (DataForSEO + GSC) data.
 
-**Planned command:** `python -m competitive_intelligence.gap_analyzer --offering "AI Development"`
+### Gap taxonomy
+
+| Type | Trigger | Action implication |
+|---|---|---|
+| `coverage_gap` | Damco not in top 100 AND ≥1 tracked competitor in top 10 | No competing page exists (or it's invisible). Content investment. |
+| `displacement` | Damco at #11-30 AND competitor in top 10 | Page exists; needs targeted on-page work to push past specific competitors. Quick-win territory. |
+| `cluster_win` | Same competitor wins top-10 placements for ≥3 keywords in the offering | They dominate a sub-niche; cluster strategy needed (multiple pages). |
+| `low_priority` | Damco rank > 30 | Has content but far from page 1. Lower ROI unless GSC traffic is meaningful. |
+| `none` | Damco in top 10 | Already defended. |
+
+### Severity scoring (1-10)
+
+GSC-traffic-weighted: gaps on keywords with real Google impressions/clicks score higher.
+
+- Base: 3 (coverage), 4 (displacement)
+- +0.4 per tracked competitor in top 10 (max +4)
+- +2 if ≥100 GSC impressions in 14 days
+- +3 if any GSC clicks in 14 days (real money at stake)
+- +1 if any top-10 competitor is `threat_tier = primary`
+
+### LLM narrative (optional)
+
+`--with-narrative` invokes Claude (model = `CLAUDE_MODEL_DEFAULT`, default `sonnet-4-6`) to produce a per-offering executive summary + 5 prioritized recommendations with QUICK WIN vs INVESTMENT labels. Costs ~$0.02-0.05 per offering with Sonnet.
+
+When ANTHROPIC_API_KEY is missing or credit is exhausted, falls back to a rule-based summary. The reports still generate; only the strategic narrative is downgraded.
+
+### Outputs
+
+- **`outputs/reports/gap_analysis_<date>.xlsx`** — single workbook covering whatever offerings ran:
+  - Sheet 1 *Per-Keyword*: one row per active keyword with gap_type, severity, Damco position, GSC data, top 3 competitors
+  - Sheet 2 *Cluster Wins*: every competitor winning ≥3 keywords in any offering
+  - Sheet 3 *Summary*: per-offering totals
+- **`outputs/audits/gap_analysis_<offering>_<date>.md`** — one markdown report per offering with narrative (LLM or rule-based), cluster wins table, full coverage/displacement lists
+
+### Command
+
+```bash
+# All 15 offerings, rule-based summaries (default)
+python -m competitive_intelligence.gap_analyzer
+
+# One offering, LLM narrative
+python -m competitive_intelligence.gap_analyzer --offering "AI" --with-narrative
+
+# All offerings with LLM (cost: ~$0.30-0.75 with Sonnet)
+python -m competitive_intelligence.gap_analyzer --with-narrative
+
+# Generate reports without logging an agent_runs entry
+python -m competitive_intelligence.gap_analyzer --dry-run
+```
+
+### Validation (2026-05-28)
+
+- 15 offerings, 1,112 keywords analyzed in **1.2 seconds**
+- 347 coverage gaps, 358 displacement gaps, 1,008 cluster wins flagged
+- AI offering's top quick-win candidates surfaced correctly (ai consulting companies, ai software development variants, ai application development family)
+- Top content-investment candidate `ai agent development` flagged correctly — page exists at `/ai-agent-development` but isn't ranking; GSC shows 8 clicks / 1,063 impressions waiting to be unlocked
 
 ---
 
