@@ -10,7 +10,7 @@ Build sequence:
 |---|---|
 | `gap_analyzer.py` | **Built and validated** — Classifies every active keyword as `coverage_gap` / `displacement` / `cluster_win` / none. GSC-traffic-weighted severity. Outputs multi-sheet Excel + per-offering markdown. LLM-narrated executive summary + recommendations when `--with-narrative` (uses `common.llm`). Validated on all 15 offerings in 1.2s. |
 | `event_digest.py` | Planned — Reads `competitor_serp_events`, surfaces high-severity changes since last digest. |
-| `competitor_monitor.py` | Planned — Crawls competitor pages, detects content/title/H1 changes; writes `competitor_changes`. |
+| `competitor_monitor.py` | **Built and validated** — Crawls top-N competitor URLs (default: primary + watch tier) via shared crawler. Diffs each against stored state in `competitor_pages` (migration 007). Emits `competitor_changes` events: `new_page`, `removed` (404/410 only — bot-blocks and 5xx are filtered out), `title_change`, `meta_change`, `structure_change` (H1 or schema markup), `content_update`. Per-URL cadence via `--cadence` flag. |
 | `backlink_analyzer.py` | Planned — DataForSEO backlink endpoint; profiles primary competitors. |
 | `content_monitor.py` | Planned — Tracks new URLs indexed under competitor domains. |
 

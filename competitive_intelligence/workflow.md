@@ -6,7 +6,7 @@ Runbook for the Competitive Intelligence Agent. `gap_analyzer.py` is **available
 
 | User says / asks | Section | Status |
 |---|---|---|
-| "what changed on competitor sites", "weekly competitor digest" | [1. Competitor monitor](#1-competitor-monitor) | Planned |
+| "what changed on competitor sites", "competitor page rewrites", "title changes", "new competitor pages", "removed pages" | [1. Competitor monitor](#1-competitor-monitor) | **Available** |
 | "competitor backlinks", "where are they getting links" | [2. Backlink analyzer](#2-backlink-analyzer) | Planned |
 | "what are they publishing", "competitor blog tracker" | [3. Content monitor](#3-content-monitor) | Planned |
 | "gap analysis", "what topics are we missing", "where competitors win and we don't", "displacement opportunities", "quick wins" | [4. Gap analyzer](#4-gap-analyzer) | **Available** |
@@ -21,13 +21,70 @@ Runbook for the Competitive Intelligence Agent. `gap_analyzer.py` is **available
 
 ## 1. Competitor monitor
 
-**Planned module:** `competitor_monitor.py`
+**Module:** `competitor_monitor.py` — **Available now.**
 
-**Behavior when built:** weekly crawl of each competitor's pillar and service pages. Diff against the last snapshot. Score significance of changes (title / H1 / new sections get higher scores). Write meaningful changes to `competitor_changes` and send an email digest.
+Crawls tracked competitor URLs (top-N ranking results per keyword) on a cadence and detects on-page changes that operations should know about between rank-tracker cycles.
 
-**Planned command:** `python -m competitive_intelligence.competitor_monitor [--competitor domain.com]`
+### What's monitored
 
-**Dependencies:** `common/connectors/crawler.py` (same one `technical_seo` needs).
+By default: every (competitor, url) pair where
+- `competitor.threat_tier` is `primary` or `watch` AND
+- the URL ranked top-10 for any of our active keywords in the latest snapshot.
+
+Override via `--threat-tier`, `--offering`, `--top-n`.
+
+State per URL is stored in **`competitor_pages`** (migration 007). Cadence is per-URL: a URL is re-crawled only if its `last_fetched_at` is older than `--cadence` days (default 7).
+
+### Change events emitted
+
+Each detected delta becomes one row in `competitor_changes`:
+
+| `change_type` | Significance (0-1) | Trigger |
+|---|---:|---|
+| `new_page` | 0.40 | First time crawling this URL |
+| `title_change` | 0.70 | `<title>` differs |
+| `meta_change` | 0.50 | meta description differs |
+| `structure_change` | 0.60 | H1 changed OR schema `@type` set changed |
+| `content_update` | 0.40-0.80 | Only fires if no other change above; significance scales with word_count delta |
+| `removed` | 0.50 | URL now returns 404 or 410 (true "gone" signals only — 403 bot-blocks and 5xx transient errors are filtered) |
+
+### Status-code handling
+
+- **200 + HTML** → normal diff path
+- **404 / 410** → `removed` event (real signal)
+- **403 / 401** → skipped (bot-blocked, not a content change)
+- **5xx** → skipped (transient server error)
+- **transport error** → skipped (our side / network)
+
+This prevents bot-blocked competitor pages (clutch.co, bairesdev.com, etc.) from polluting the change stream with phantom "removed" events.
+
+### Command
+
+```bash
+# Default: primary + watch tier competitors, top-10 URLs, all offerings, 7-day cadence
+python -m competitive_intelligence.competitor_monitor
+
+# Only primary threats (smaller scope)
+python -m competitive_intelligence.competitor_monitor --threat-tier primary
+
+# One offering
+python -m competitive_intelligence.competitor_monitor --offering "AI"
+
+# Wider net — also track top-20 placements
+python -m competitive_intelligence.competitor_monitor --top-n 20
+
+# Force re-crawl ignoring cadence
+python -m competitive_intelligence.competitor_monitor --all
+
+# Dry run
+python -m competitive_intelligence.competitor_monitor --dry-run
+```
+
+### Cost / time
+
+Free (HTTP only via shared crawler). Rate-limited 1 req/sec/origin by the crawler. 4 parallel workers.
+
+Validated on primary-tier AI scope (52 URLs): ~40 seconds. First run produced 46 `new_page` events; immediate re-crawl produced 0 events (diff logic confirmed only firing on real changes).
 
 ---
 
