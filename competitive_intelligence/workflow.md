@@ -13,7 +13,8 @@ Runbook for the Competitive Intelligence Agent. `gap_analyzer.py` is **available
 | "add / remove / mute a competitor", "manage competitor roster" | [5. Competitor roster](#5-competitor-roster) | Available |
 | "show competitor SERP positions for our keywords" | [6. Query: competitor SERPs](#6-query-competitor-serps) | Available |
 | "who's competing in the AI offering", "share of voice", "top competitors per offering" | [7. Query: offering rollup](#7-query-offering-rollup) | Available |
-| "what changed in the SERP", "new entrants", "high-priority events", "weekly digest" | [8. Query: SERP event feed](#8-query-serp-event-feed) | Available |
+| "what changed in the SERP", "weekly digest", "summary of changes", "what should I look at this week" | [11. Event digest](#11-event-digest) | **Available** |
+| "what changed in the SERP" (raw query) | [8. Query: SERP event feed](#8-query-serp-event-feed) | Available |
 | "who's outranking us right now", "displacement events" | [9. Query: damco displacement](#9-query-damco-displacement) | Available |
 | "AI Overview citations", "GEO visibility per keyword" | [10. Query: AI Overview tracking](#10-query-ai-overview-tracking) | Available |
 
@@ -384,6 +385,72 @@ GROUP BY citation->>'domain'
 ORDER BY citation_count DESC
 LIMIT 20;
 ```
+
+---
+
+## 11. Event digest
+
+**Module:** `event_digest.py` — **Available now.**
+
+Reads `competitor_serp_events` and produces a markdown digest of changes that happened in the SERPs since the last digest run. This is the alert layer — the question it answers is *"what should I look at this week?"*.
+
+### What it shows
+
+By default: events with severity `critical`, `high`, or `medium`. Add `--all-severity` to include `low`/`info` (mostly noise).
+
+Events are grouped into report sections:
+
+1. **🚨 Damco-side movements** — `damco_drops_top_n`, `damco_enters_top_n`, `damco_position_change` (our own SERP positions changing)
+2. **⚠️ Competitor entries & exits** — `new_entrant`, `drop_out` (top-10 churn)
+3. **📊 Position movements** — `position_gain`, `position_drop` (competitors moving ≥3 positions)
+4. **Threat-tier changes & first sightings** — `threat_tier_changed` (especially promotions to `primary`), `first_seen_anywhere`
+5. **SERP feature changes** — `serp_feature_appeared`/`_disappeared` (AI Overview, featured snippet, etc.)
+
+### "Since when" resolution
+
+The lower bound for events is computed in this order:
+
+1. `--since YYYY-MM-DD` flag (explicit override)
+2. Otherwise: the latest successful `agent_runs` row for this agent's name — events from that date forward
+3. Otherwise (first run ever): default to last 14 days
+
+This means a recurring schedule produces a non-overlapping digest each cycle.
+
+### LLM editorial summary (optional)
+
+`--with-narrative` adds a 2-3 sentence "what happened" paragraph + 3 tagged action bullets (URGENT / THIS WEEK / BACKLOG) at the top of the digest. Falls back to rule-based summary when ANTHROPIC_API_KEY is missing or credit exhausted.
+
+### Outputs
+
+`outputs/audits/serp_event_digest_<since>_to_<today>[_<offering>].md`
+
+### Command
+
+```bash
+# Default: events since last successful digest, OR last 14 days if first run
+python -m competitive_intelligence.event_digest
+
+# One offering
+python -m competitive_intelligence.event_digest --offering "AI"
+
+# Custom window
+python -m competitive_intelligence.event_digest --since 2026-05-01
+
+# Include LLM editorial summary
+python -m competitive_intelligence.event_digest --with-narrative
+
+# Include low + info severity (very noisy)
+python -m competitive_intelligence.event_digest --all-severity
+
+# Dry run — generate report, skip agent_runs DB write
+python -m competitive_intelligence.event_digest --dry-run
+```
+
+### Validation (2026-05-28)
+
+- 1,207 events analyzed across 2026-05-15 → 2026-05-28 in 0.15s
+- Surfaced 14 new primary-threat promotions (`itransition.com` with 90 kw across 10 offerings; `toptal.com` 21 kw / 8 offerings; etc.) — the actionable signal
+- Collapsed 1,193 noisy peripheral→watch baseline tier-changes into a single summary line so they don't bury the real signal
 
 ---
 
