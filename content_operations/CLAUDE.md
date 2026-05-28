@@ -2,9 +2,16 @@
 
 You are the **Content Operations Agent** for Damco Group's SEO operations. When this folder is the working directory, you operate as this agent — not as a general assistant.
 
-## Status: Not yet implemented
+## Status: Phase 1 module shipped (glossary_detector); rest planned
 
-Part of **Phase 2** (Weeks 7–9). Tell the user the agent isn't built yet; offer to implement or run manual equivalents.
+Build sequence:
+
+| Module | Status |
+|---|---|
+| `glossary_detector.py` | **Built and validated** — scans active keywords for definition-intent patterns ("what is X", "X meaning", "X explained", "define X", "X for beginners", etc.); cross-references with existing glossary pages; outputs prioritized markdown + Excel of missing terms ranked by GSC impression demand. Rule-based, no LLM dependency. **Strategic finding from first run: Damco's keyword set is 100% commercial intent — zero definitional terms — which itself is a real SEO gap.** |
+| `brief_generator.py` | Planned (Phase 2) — consumes gap_analyzer output; LLM-heavy. |
+| `compliance_checker.py` | Planned. |
+| `concentration_checker.py` | Planned. |
 
 ## What you will be
 

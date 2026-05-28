@@ -8,7 +8,7 @@ Runbook for the Content Operations Agent. **Not yet implemented** — most secti
 |---|---|---|
 | "generate a brief for [keyword/URL]" | [1. Brief generation](#1-brief-generation) | Planned |
 | "check this content against the brief", "run compliance" | [2. Compliance check](#2-compliance-check) | Planned |
-| "what glossary pages are missing" | [3. Glossary detection](#3-glossary-detection) | Planned |
+| "what glossary pages are missing", "definition-intent gaps", "AEO opportunities" | [3. Glossary detection](#3-glossary-detection) | **Available** |
 | "are we over-concentrated on X", "content calendar balance" | [4. Concentration check](#4-concentration-check) | Planned |
 | "show open briefs", "brief status" | [5. Query: brief pipeline](#5-query-brief-pipeline) | Available |
 | "show compliance history for page X" | [6. Query: compliance history](#6-query-compliance-history) | Available |
@@ -52,9 +52,65 @@ python -m content_operations.compliance_checker --page-id 123 --content-url http
 
 ## 3. Glossary detection
 
-**Planned module:** `glossary_detector.py`
+**Module:** `glossary_detector.py` — **Available now.**
 
-**Behavior when built:** scans `keywords` for patterns like "what is X", "X meaning", "X definition", cross-references against existing glossary pages (`pages.page_type = 'glossary'`), and outputs a prioritized list of missing glossary entries ranked by search volume.
+Scans every active keyword for definition-intent phrasing, extracts the underlying term, cross-references against existing glossary pages, and produces a prioritized list of missing entries.
+
+### Patterns recognized
+
+| Pattern | Example | Strength |
+|---|---|---:|
+| `what is X` / `what are X` | "what is agentforce" | 1.0 |
+| `X meaning` / `X definition` | "agentforce meaning" | 1.0 |
+| `define X` | "define data enrichment" | 1.0 |
+| `X explained` | "agentforce explained" | 0.9 |
+| `how does X work` | "how does agentforce work" | 0.9 |
+| `X basics` / `X fundamentals` | "agentforce basics" | 0.8 |
+| `introduction to X` | "introduction to agentforce" | 0.8 |
+| `X for beginners` | "agentforce for beginners" | 0.7 |
+| `X guide` | "agentforce guide" | 0.6 |
+
+### Priority scoring
+
+Each missing term is scored:
+- `strength × ((impressions / 100) + (clicks × 5) + (match_count × 2))`
+- Impressions are the strongest demand signal; clicks weight more heavily; multiple matching phrasings (e.g., "what is X" + "X meaning") reinforce the signal.
+
+### Outputs
+
+- `outputs/audits/glossary_gaps_<date>[_<offering>].md` — narrative with priority table + per-term detail
+- `outputs/reports/glossary_gaps_<date>.xlsx` — two sheets:
+  - Ranked candidates (sortable/filterable)
+  - Long-format matching keywords (every kw that triggered a candidate)
+
+### Command
+
+```bash
+# Default — all 1,112 active keywords
+python -m content_operations.glossary_detector
+
+# One offering
+python -m content_operations.glossary_detector --offering "AI"
+
+# Only candidates with real GSC demand
+python -m content_operations.glossary_detector --min-impressions 50
+
+# Dry run
+python -m content_operations.glossary_detector --dry-run
+```
+
+### Cost / time
+
+Free — rule-based, no API calls. Runs in under 1 second across 1,112 keywords.
+
+### Strategic finding from first run (2026-05-28)
+
+**Zero candidates surfaced across all 15 offerings.** Damco's tracked keyword set is 100% commercial intent ("X services", "X company", "X consulting", "X development"). No definitional, educational, or informational searches at all.
+
+This is itself the headline finding for the SEO strategy team:
+- AI search engines (Perplexity, ChatGPT search, Google AI Overviews) overwhelmingly cite definitional/educational content. Damco currently has zero SEO surface in that intent category.
+- Action: expand keyword research to cover **what is**, **how does**, **X explained**, **X vs Y** variants of Damco's core topics. Even adding ~50-100 such keywords would unlock a meaningful AI-citation opportunity.
+- The glossary_detector will then start surfacing real candidates as those keywords are added.
 
 ---
 
