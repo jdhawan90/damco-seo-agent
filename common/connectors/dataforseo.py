@@ -412,6 +412,15 @@ def get_keyword_data(keywords: Iterable[str], location_code: int | None = None,
 # Backlinks
 # ---------------------------------------------------------------------------
 
+class DataForSEOAccessDenied(DataForSEOError):
+    """
+    Raised when DataForSEO returns 40204 (subscription required). Lets
+    agents distinguish "no subscription" (a setup issue the operator can
+    fix) from generic errors. Use this to fall back to a degraded mode
+    rather than crashing.
+    """
+
+
 def get_backlinks(target: str, limit: int = 1000, mode: str = "as_is") -> list[dict]:
     """
     Fetch backlinks pointing to a target URL or domain.
@@ -424,13 +433,30 @@ def get_backlinks(target: str, limit: int = 1000, mode: str = "as_is") -> list[d
         Max number of backlinks to return (DataForSEO supports up to 1000 per call).
     mode : {"as_is", "one_per_domain", "one_per_anchor"}
         DataForSEO aggregation mode. "as_is" returns every backlink.
+
+    Raises
+    ------
+    DataForSEOAccessDenied
+        Backlinks API requires its own subscription (separate from the
+        SERP pay-per-query model). 40204 status comes back when it isn't
+        active on the account.
     """
     payload = [{"target": target, "limit": limit, "mode": mode}]
     data = _post("/backlinks/backlinks/live", payload)
 
     out: list[dict] = []
     for task in data.get("tasks", []):
-        if task.get("status_code") != OK_STATUS_CODE:
+        status = task.get("status_code")
+        if status == 40204:
+            raise DataForSEOAccessDenied(
+                f"DataForSEO Backlinks API access denied (status_code=40204). "
+                f"Activate the Backlinks subscription at "
+                f"https://app.dataforseo.com/backlinks-subscription. "
+                f"Server message: {task.get('status_message', '')!r}"
+            )
+        if status != OK_STATUS_CODE:
+            logger.warning("get_backlinks task returned status=%s message=%r",
+                           status, task.get("status_message"))
             continue
         for result in task.get("result") or []:
             for item in result.get("items") or []:

@@ -7,7 +7,7 @@ Runbook for the Competitive Intelligence Agent. `gap_analyzer.py` is **available
 | User says / asks | Section | Status |
 |---|---|---|
 | "what changed on competitor sites", "competitor page rewrites", "title changes", "new competitor pages", "removed pages" | [1. Competitor monitor](#1-competitor-monitor) | **Available** |
-| "competitor backlinks", "where are they getting links" | [2. Backlink analyzer](#2-backlink-analyzer) | Planned |
+| "competitor backlinks", "where are they getting links", "outreach prospects", "common referring domains" | [2. Backlink analyzer](#2-backlink-analyzer) | **Built (needs subscription)** |
 | "what are they publishing", "competitor blog tracker" | [3. Content monitor](#3-content-monitor) | Planned |
 | "gap analysis", "what topics are we missing", "where competitors win and we don't", "displacement opportunities", "quick wins" | [4. Gap analyzer](#4-gap-analyzer) | **Available** |
 | "add / remove / mute a competitor", "manage competitor roster" | [5. Competitor roster](#5-competitor-roster) | Available |
@@ -91,13 +91,65 @@ Validated on primary-tier AI scope (52 URLs): ~40 seconds. First run produced 46
 
 ## 2. Backlink analyzer
 
-**Planned module:** `backlink_analyzer.py`
+**Module:** `backlink_analyzer.py` — **Built. Blocked on DataForSEO Backlinks API subscription.**
 
-**Behavior when built:** pulls each competitor's backlinks via `common.connectors.dataforseo.get_backlinks()`, classifies by domain authority and niche, ranks platforms Damco should target. Produces a list for `offpage_links/`.
+### Prerequisite
 
-**Planned command:** `python -m competitive_intelligence.backlink_analyzer`
+Unlike the SERP API (pay-per-query), the Backlinks API requires a separate **monthly subscription**. Without it, calls return `status_code=40204` and the connector raises `DataForSEOAccessDenied`. The module degrades gracefully — generates a stub report explaining what's needed.
 
-**Workaround today:** use the DataForSEO connector directly, store results in `backlinks` (with a marker that it's a competitor's).
+To activate:
+1. Open https://app.dataforseo.com/backlinks-subscription
+2. Pick a tier (typically $99-499/month depending on volume)
+3. No code changes needed — the next run will work
+
+### What it does
+
+- Loads competitors by threat tier (default: `primary` only) or specific `--domain`.
+- Calls DataForSEO `/v3/backlinks/backlinks/live` for each, with `--limit` results per competitor (default 500, max 1000).
+- Upserts into `competitor_backlinks` (migration 008): source_url, source_domain, target_url, anchor_text, dofollow, domain_rank (0-100 authority), first_seen, last_seen.
+- Cross-analyzes:
+  - Top referring domains across all primary threats
+  - **Outreach prospects** — referring domains linking to ≥2 primary threats (highest-leverage targets; they already publish about this space)
+  - Anchor-text patterns competitors are building
+- Per-URL cadence: re-pulls only if previous fetch is older than `--cadence` days (default 30).
+
+### Outputs
+
+- `outputs/reports/backlink_analysis_<date>.xlsx` — 4 sheets:
+  - Per-Competitor (summary stats)
+  - Top Referring Domains (all)
+  - Outreach Prospects (≥2 competitors linked, not Damco)
+  - Anchor Patterns
+- `outputs/audits/backlink_analysis_<date>.md` — narrative report
+
+### Command
+
+```bash
+# Default: primary threat tier, top 500 backlinks each, monthly cadence
+python -m competitive_intelligence.backlink_analyzer
+
+# Wider scope: primary + watch
+python -m competitive_intelligence.backlink_analyzer --threat-tier primary,watch
+
+# One specific competitor
+python -m competitive_intelligence.backlink_analyzer --domain itransition.com
+
+# Lower limit to control cost
+python -m competitive_intelligence.backlink_analyzer --limit 100
+
+# Force re-pull ignoring 30-day cadence
+python -m competitive_intelligence.backlink_analyzer --all
+
+# Generate reports from existing DB data only (no API calls)
+python -m competitive_intelligence.backlink_analyzer --analyze-only
+
+# Dry-run: calls API (real cost) but doesn't write to DB
+python -m competitive_intelligence.backlink_analyzer --dry-run
+```
+
+### Cost model
+
+Backlinks API is subscription-based, not pay-per-query. Once subscribed, calls are typically included in the monthly tier (within quota). Verify your current tier's call quota before running on all 14 primary threats × 500 backlinks each = 7,000 backlink records.
 
 ---
 
