@@ -509,8 +509,29 @@ def diff_serp_features(prev: list[str], curr: list[str]) -> list[dict]:
 # Write phase
 # ---------------------------------------------------------------------------
 
+def normalize_competitor_domain(domain: str | None) -> str:
+    """
+    Canonical form for competitor_domain storage.
+
+    DataForSEO returns hostnames as-seen on the SERP, which means
+    `www.itransition.com` and `itransition.com` create separate rows
+    in `competitors` even though they're the same business. We strip
+    a leading `www.` so seeded entries (which we curated as bare
+    domains) merge with auto-stubbed ones from DataForSEO.
+
+    Lowercase + strip whitespace too — defensive.
+    """
+    if not domain:
+        return ""
+    d = domain.strip().lower()
+    if d.startswith("www."):
+        d = d[4:]
+    return d
+
+
 def upsert_competitor(cur, domain: str, today: date) -> int:
     """Insert-or-update a competitor stub. Returns competitor_id."""
+    domain = normalize_competitor_domain(domain)
     category = categorize_competitor(domain)
     cur.execute(
         """
