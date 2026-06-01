@@ -785,10 +785,23 @@ def refresh_offering_rollup() -> None:
 # Console summary
 # ---------------------------------------------------------------------------
 
+def _safe_console(s: str | None) -> str:
+    """
+    Strip characters that crash the Windows cp1252 console when stdout
+    is redirected (zero-width-space etc.). The DB rows still hold the
+    original keyword text — this only sanitizes terminal display.
+    """
+    if not s:
+        return ""
+    for ch in ("​", "‌", "‍", "﻿"):
+        s = s.replace(ch, "")
+    return s
+
+
 def print_summary(results: list[dict], run_date: date) -> None:
     print()
     print(f"  {'=' * 72}")
-    print(f"   DAMCO Rank Tracker — {run_date.isoformat()}")
+    print(f"   DAMCO Rank Tracker -- {run_date.isoformat()}")
     print(f"  {'=' * 72}")
     print()
 
@@ -808,7 +821,7 @@ def print_summary(results: list[dict], run_date: date) -> None:
     if striking:
         print(f"  STRIKING DISTANCE (positions 11-20): {len(striking)} keywords")
         for r in sorted(striking, key=lambda x: x["rank_position"]):
-            print(f"    pos {r['rank_position']:>3}  {r['keyword']}")
+            print(f"    pos {r['rank_position']:>3}  {_safe_console(r['keyword'])}")
         print()
 
 
