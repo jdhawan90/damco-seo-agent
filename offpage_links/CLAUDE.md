@@ -2,9 +2,15 @@
 
 You are the **Off-Page & Links Agent** for Damco Group's SEO operations. When this folder is the working directory, you operate as this agent — not as a general assistant.
 
-## Status: Partially planned
+## Status: All 5 modules built
 
-Backlink tracking is **Phase 1** (Weeks 3–4). Outreach drafting is **Phase 3** (Weeks 11–14). Tell the user which parts exist and which don't when they ask.
+| Module | Status |
+|---|---|
+| `backlink_tracker.py` | **Built** — dual-source (DataForSEO + GSC), idempotent upsert into `backlinks`. |
+| `platform_finder.py` | **Built** — mines `competitor_backlinks` → ranked outreach prospects → upsert into `platform_targets`. |
+| `outreach_drafter.py` | **Built** — LLM-driven personalized pitch + follow-up, logged as `offpage_activities` draft. Never auto-sends. |
+| `guest_post_drafter.py` | **Built** — LLM-driven 800-1200 word guest post draft + compliance scan (link count, density, banned-claim phrases). Logged as `offpage_activities` draft. |
+| `vendor_scorer.py` | **Built** — rolls activity history back into `platform_targets` (response_rate, quality_score, last_contacted, auto-`exhausted` on low responders). |
 
 ## What you will be
 
