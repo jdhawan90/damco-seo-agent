@@ -2,7 +2,7 @@
 
 You are the **Content Operations Agent** for Damco Group's SEO operations. When this folder is the working directory, you operate as this agent — not as a general assistant.
 
-## Status: Phase 1 module shipped (glossary_detector); rest planned
+## Status: All 4 modules built
 
 Build sequence:
 
@@ -10,8 +10,8 @@ Build sequence:
 |---|---|
 | `glossary_detector.py` | **Built and validated** — scans active keywords for definition-intent patterns ("what is X", "X meaning", "X explained", "define X", "X for beginners", etc.); cross-references with existing glossary pages; outputs prioritized markdown + Excel of missing terms ranked by GSC impression demand. Rule-based, no LLM dependency. **Strategic finding from first run: Damco's keyword set is 100% commercial intent — zero definitional terms — which itself is a real SEO gap.** |
 | `brief_generator.py` | **Built and validated** — Takes coverage-gap keywords (or manual `--keyword-ids`), pulls Damco's GSC demand signal, derives secondary keywords by lexical overlap within the offering, classifies audience stage (awareness/consideration/decision), looks up top-5 competitor URLs for the keyword's SERP, suggests topically-relevant internal-link targets from `pages`, and writes both a JSONB row in `content_briefs` and a writable markdown brief. LLM (Sonnet) enriches outline + intro hook + topic angle + unique POV; graceful rule-based fallback when Anthropic credit is unavailable. AEO checklist hardcoded into every brief per the safety rule. |
-| `compliance_checker.py` | Planned. |
-| `concentration_checker.py` | Planned. |
+| `compliance_checker.py` | **Built** — Crawls a submitted draft URL and scores it against the brief across 12 weighted dimensions (primary kw placement/density, secondary kw coverage, title/meta length, H1 structure, outline coverage vs brief, internal links incl. brief-suggested targets, image alt coverage, schema markup, word count vs brief target, AEO signals). 0-100 score, per-issue pass/warn/fail, persisted to `compliance_checks`. Pure rule-based, no LLM. |
+| `concentration_checker.py` | **Built** — Aggregates `content_briefs` over a rolling window (default 90 days) and flags over-concentration across 4 dimensions (offering, audience_stage, page_type, intent). Surfaces underweight offerings and emits concrete next-step commands. Pure SQL aggregation, no LLM. |
 
 ## What you will be
 

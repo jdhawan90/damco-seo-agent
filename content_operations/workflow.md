@@ -7,9 +7,9 @@ Runbook for the Content Operations Agent. **Not yet implemented** — most secti
 | User says / asks | Section | Status |
 |---|---|---|
 | "generate a brief", "create content briefs from gap_analyzer", "what should writers work on" | [1. Brief generation](#1-brief-generation) | **Available** |
-| "check this content against the brief", "run compliance" | [2. Compliance check](#2-compliance-check) | Planned |
+| "check this content against the brief", "run compliance" | [2. Compliance check](#2-compliance-check) | **Available** |
 | "what glossary pages are missing", "definition-intent gaps", "AEO opportunities" | [3. Glossary detection](#3-glossary-detection) | **Available** |
-| "are we over-concentrated on X", "content calendar balance" | [4. Concentration check](#4-concentration-check) | Planned |
+| "are we over-concentrated on X", "content calendar balance" | [4. Concentration check](#4-concentration-check) | **Available** |
 | "show open briefs", "brief status" | [5. Query: brief pipeline](#5-query-brief-pipeline) | Available |
 | "show compliance history for page X" | [6. Query: compliance history](#6-query-compliance-history) | Available |
 
@@ -96,14 +96,60 @@ Without `--no-llm` and without Anthropic credit: $0 (rule-based output, `[PLACEH
 
 ## 2. Compliance check
 
-**Planned module:** `compliance_checker.py`
+**Module:** `compliance_checker.py` — **Available now.**
 
-**Behavior when built:** reads submitted content from a URL or local file, scores against the brief (keyword density per term, meta title length, meta description length, H1 presence + uniqueness, internal link count + target relevance, image alt text coverage, schema presence), writes the scorecard to `compliance_checks`.
+Crawls a submitted draft URL and scores it against the brief that was generated for the same target. 12 weighted dimensions, 0–100 score, per-issue pass/warn/fail. Pure rule-based — no LLM cost.
 
-**Planned command:**
+### Dimensions checked
+
+| Dimension | Weight | What's measured |
+|---|---:|---|
+| `primary_keyword_placement` | 18 | Primary kw in title, H1, meta, first 100 words |
+| `primary_keyword_density`   | 8  | Body density in 0.5–3.0% band |
+| `secondary_keyword_coverage`| 8  | Each brief secondary kw appears ≥1× |
+| `title_length`              | 6  | 50–60 chars ideal, 30–70 acceptable |
+| `meta_description`          | 8  | 140–160 chars ideal |
+| `h1_structure`              | 6  | Exactly one H1 |
+| `outline_coverage`          | 8  | Brief H2s + must-include subtopics show up |
+| `internal_links`            | 8  | ≥3 internal links + brief-suggested targets present |
+| `image_alt_text`            | 6  | ≥80% body images have alt |
+| `schema_markup`             | 6  | JSON-LD present; FAQPage = bonus |
+| `word_count`                | 8  | ≥85% of brief target |
+| `aeo_signals`               | 10 | Question headings, lists, FAQ section, ≥2 external citations |
+
+### Modes
+
+| Flag | Behavior |
+|---|---|
+| `--brief-id N` | Load brief and audit its `target_url` |
+| `--url URL` | Override brief's URL (e.g. staging vs production) |
+| `--brief-id N --url URL` | Audit a specific URL against a specific brief |
+| Only `--url URL` | Generic SEO checks; placement/coverage checks skipped (warn) |
+| `--dry-run` | Write report; skip DB inserts |
+
+### Outputs
+
+- **DB:** one `compliance_checks` row per audit (`overall_score`, `issues_json`, `keyword_density`, `meta_status`, `internal_links_count`)
+- **Disk:** `outputs/audits/compliance_<slug>_<date>.md` — narrative report grouped by severity, top-5 failure punch list
+
+### Command
+
 ```bash
-python -m content_operations.compliance_checker --page-id 123 --content-url https://draft.damcogroup.com/new-page
+# Score the draft URL captured in the brief
+python -m content_operations.compliance_checker --brief-id 1
+
+# Audit staging instead of the brief's target_url
+python -m content_operations.compliance_checker --brief-id 1 --url https://staging.damcogroup.com/data-enrichment-services
+
+# Generic check, no brief (just SEO basics)
+python -m content_operations.compliance_checker --url https://www.damcogroup.com/ai-agent-development
 ```
+
+### Verdict thresholds
+
+- **≥85** — "Ready to publish"
+- **70–84** — "Revise before publish"
+- **<70** — "Major work needed"
 
 ---
 
@@ -173,9 +219,46 @@ This is itself the headline finding for the SEO strategy team:
 
 ## 4. Concentration check
 
-**Planned module:** `concentration_checker.py`
+**Module:** `concentration_checker.py` — **Available now.**
 
-**Behavior when built:** analyzes the distribution of content briefs (by offering, by audience stage, by keyword intent) over a rolling 90-day window. Flags when any one bucket exceeds 40% of total output — prevents SEO blind spots.
+Aggregates `content_briefs` over a rolling window (default 90 days) and flags over-concentration across 4 dimensions. Pure rule-based; reads from JSONB so no extra schema needed.
+
+### Dimensions checked
+
+- `offering` — which Damco service line each brief targets
+- `audience_stage` — awareness / consideration / decision
+- `page_type` — service / pillar / blog / landing / glossary
+- `intent` — informational / commercial / transactional
+
+### Flags raised
+
+- Any single bucket >40% of output (default threshold; tunable via `--threshold`)
+- Top-two buckets combined >70% (narrow distribution)
+- For `offering`: offerings with active keywords but zero briefs in the window
+
+### Output
+
+`outputs/audits/concentration_<date>.md` with:
+- Per-dimension distribution tables
+- Flagged dimensions + reasons
+- Concrete next-step recommendations (e.g. "run brief_generator --coverage-gap --offering 'Microsoft' --limit 5")
+
+### Command
+
+```bash
+# Default — 90-day window, 40% threshold
+python -m content_operations.concentration_checker
+
+# Tighter window, tighter threshold
+python -m content_operations.concentration_checker --days 60 --threshold 30
+
+# One dimension only
+python -m content_operations.concentration_checker --dimension offering
+```
+
+### When to run
+
+After every `brief_generator` batch — keeps the calendar from quietly skewing.
 
 ---
 
