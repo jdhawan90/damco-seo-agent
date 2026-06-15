@@ -204,11 +204,24 @@ def match_and_store(gsc_data: list[dict], lookback_days: int, dry_run: bool = Fa
     }
 
 
+def _safe_console(s: str | None) -> str:
+    """
+    Strip characters that crash the Windows cp1252 console when stdout
+    is redirected (zero-width-space etc.). The DB rows still hold the
+    original keyword text — this only sanitizes terminal display.
+    """
+    if not s:
+        return ""
+    for ch in ("​", "‌", "‍", "﻿"):
+        s = s.replace(ch, "")
+    return s
+
+
 def print_summary(stats: dict, lookback_days: int) -> None:
     """Print a console summary of the GSC enrichment run."""
     print()
     print(f"  {'=' * 60}")
-    print(f"   GSC Enrichment — {lookback_days}-day average")
+    print(f"   GSC Enrichment -- {lookback_days}-day average")
     print(f"  {'=' * 60}")
     print()
     print(f"  GSC queries returned:    {stats['total_gsc_queries']}")
@@ -222,7 +235,8 @@ def print_summary(stats: dict, lookback_days: int) -> None:
         print(f"  {'KEYWORD':<40} {'GSC Pos':>8} {'Clicks':>8} {'Impr':>8} {'CTR':>8}")
         print(f"  {'-' * 72}")
         for m in sorted(stats["matches"], key=lambda x: x["position"]):
-            print(f"  {m['keyword'][:38]:<40} {m['position']:>8.1f} {m['clicks']:>8} "
+            kw = _safe_console(m['keyword'])[:38]
+            print(f"  {kw:<40} {m['position']:>8.1f} {m['clicks']:>8} "
                   f"{m['impressions']:>8} {m['ctr']:>7.2%}")
         print()
 
