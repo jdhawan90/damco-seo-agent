@@ -50,9 +50,15 @@ make sure each still appears in at least one heading or the opening.
 ## Workflow
 
 ### Step 0 — Load the rules
-Read `reference/channel-profiles.md` (the row for this platform),
+Read `reference/damco-style-guide.md` (the Damco Writing Style Guide — applies to every
+channel), `reference/channel-profiles.md` (the row for this platform),
 `reference/writing-rules.md` (applies to all channels), and — if the title is a
 listicle ("Top N", "Best", "N Companies/Tools/Partners") — `reference/listicle-rules.md`.
+
+House rules now in force: **no FAQ section on any channel**; a **"Key Takeaways"**
+section (clear heading) goes immediately after the title on every channel **except
+LinkedIn**; LinkedIn / Medium / guest blogs use a **thought-leadership tone and flow**
+(confident first-person/we-voice, opinion backed by evidence, a narrative that builds).
 
 ### Step 1 — Build the search-intent map (this is what was missing)
 Start from the **direction/brief**: it tells you why this title was chosen and the angle
@@ -82,13 +88,14 @@ contract in `scripts/md_to_docx.py`. Start the file with the `<!--META ... -->` 
 (title, meta_title, meta_description [150-160 chars], platform, primary_keywords,
 secondary_keywords, cta_url, and `brief` with the team's direction for traceability).
 Then:
+- `## Key Takeaways` (clear heading) immediately after the title, then a `> ` box of
+  3-6 liftable bullets — on every channel **except LinkedIn**, which omits it entirely.
 - Intro (no heading): business problem + thesis, objective tone, keyword in first two paras.
-- `> ` Key Takeaways box (3-6 liftable bullets) — required on SEO Articles and LinkedIn.
 - `> ` definition callout for the central term where it helps.
 - Body H2/H3 covering the Step-1 intent map; **at least one H2 contains the primary
-  keyword**. Inline-cite every stat as `[claim text](https://source-url)`.
+  keyword**. Inline-cite every stat as `[claim text](https://source-url)`. **No FAQ
+  section** — fold those questions into the prose.
 - Comparison table(s) where they earn their place; numbered lists for processes.
-- FAQ (4-6 People-Also-Ask questions) near the end — required on SEO Articles & LinkedIn.
 - Conclusion (100-125 words, no "Conclusion" heading): primary keyword + CTA link +
   forward-looking close (or a discussion question on Medium/LinkedIn).
 - `## Sources` list: source name + URL + publication year for every cited stat.
@@ -102,9 +109,10 @@ python .claude/skills/generate-article/scripts/audit.py <scratchpad>/<slug>.md
 ```
 Fix every `[FAIL]`, then re-run until it passes. Review `[WARN]`s and resolve the ones
 that apply. The audit checks: meta description, keyword usage + keyword-in-H2, stat
-count, sources section, CTA, FAQ, listicle entity-per-heading + no placeholders, em
-dashes, banned buzzwords, banned headings, AI-tell openers, colon-not-emdash bullets,
-word count, and the keyword-table placeholder.
+count, sources section, CTA, Key Takeaways present (non-LinkedIn) / absent (LinkedIn),
+no FAQ section, no "click here" link text, listicle entity-per-heading + no placeholders,
+em dashes, banned buzzwords/jargon, banned headings, AI-tell openers, colon-not-emdash
+bullets, word count, and the keyword-table placeholder.
 
 ### Step 5 — Self-review for voice (audit can't catch this)
 Read the draft once for the things the script can't measure: does it read like one
@@ -133,12 +141,18 @@ available, generate a clean PNG and embed it; otherwise render the same content 
 formatted comparison table and flag in Step 7 that a designed visual should replace it.
 Functional only — never decorative.
 
-## Non-negotiables (from SEO feedback)
+## Non-negotiables (from SEO + style-guide feedback)
+- Follow the Damco Writing Style Guide on every channel (`reference/damco-style-guide.md`).
 - Meta description on every article.
 - Primary keyword in the title AND at least one H2.
 - 5+ inline-cited primary-source stats (3+ on non-LinkedIn channels), each linked at
   the point of use, year only in Sources.
 - Full search-intent coverage including compliance/security and current trends where
   relevant — the thesis organizes the coverage, it does not replace it.
+- **No FAQ section on any channel.** Fold those questions into the prose.
+- **Key Takeaways** (clear heading, right after the title) on every channel except
+  LinkedIn; LinkedIn omits it.
+- LinkedIn / Medium / guest blogs read as thought leadership: confident, narrative,
+  opinion backed by evidence — no generic filler.
 - Listicles: one heading per real, named entity; no placeholders; objective intro.
 - Keyword frequency table auto-computed, never estimated.

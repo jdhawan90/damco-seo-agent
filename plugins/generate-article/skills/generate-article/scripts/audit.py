@@ -22,10 +22,15 @@ BANNED_HEADINGS = [
 BANNED_WORDS = [
     'game-changer', 'game changer', 'cutting-edge', 'cutting edge', 'disrupt',
     'synergy', 'seamless', 'robust', 'empower', 'unlock', 'transform',
-    'comprehensive', 'ecosystem', 'innovative',
+    'comprehensive', 'ecosystem', 'innovative', 'unicorn',
 ]
 # "leverage"/"scalable" are only flagged as verbs/without specifics -> WARN only
 SOFT_WORDS = ['leverage', 'scalable']
+# Damco Style Guide empty phrases / clichés -> WARN
+STYLE_PHRASES = [
+    'thinking outside the box', 'core competency', 'for all intents and purposes',
+    'low-hanging fruit', 'drill down', 'giving 110', 'actionable',
+]
 AI_OPENERS = [
     "it is worth noting", "it's worth noting", "it is important to note",
     "in today's", "let's explore", "let's take a look", "one of the key",
@@ -133,13 +138,26 @@ def main():
     ok = cta_hits >= 2
     report(f"Brand CTA link embedded (2-3x): {cta}", ok if ok else "warn", f"{cta_hits}x")
 
-    # --- Structure / search-intent ----------------------------------------
-    has_faq = bool(re.search(r'faq|frequently asked|questions', body, re.IGNORECASE))
-    # FAQ mandatory for SEO + LinkedIn; recommended elsewhere
-    faq_required = plat in ('seo articles', 'linkedin', 'linkedin.com')
-    report("FAQ / People-Also-Ask section", has_faq if has_faq else ("warn" if not faq_required else False))
-    if faq_required and not has_faq:
-        fails += 1
+    # --- Structure ---------------------------------------------------------
+    is_linkedin = plat in ('linkedin', 'linkedin.com')
+
+    # Key Takeaways: required (heading) on all channels EXCEPT LinkedIn
+    kt_heading = bool(re.search(r'^#{2,4}\s*key takeaways', body, re.IGNORECASE | re.MULTILINE))
+    if is_linkedin:
+        report("Key Takeaways omitted (LinkedIn does not use one)",
+               "warn" if kt_heading else True,
+               "remove the Key Takeaways section for LinkedIn" if kt_heading else "")
+    else:
+        fails += not kt_heading
+        report('"Key Takeaways" heading present (right after title)', kt_heading,
+               "" if kt_heading else "add a '## Key Takeaways' section after the title")
+
+    # FAQ: team policy is NO FAQ on any channel
+    faq_heading = bool(re.search(
+        r'^#{2,4}\s*.*\b(faq|frequently asked questions)\b', body, re.IGNORECASE | re.MULTILINE)) \
+        or bool(re.search(r'^#{2,4}\s*questions\b[^\n]*\bask', body, re.IGNORECASE | re.MULTILINE))
+    report("No FAQ section (team policy: omit FAQs)", "warn" if faq_heading else True,
+           "remove the FAQ-style section; fold the questions into the prose" if faq_heading else "")
 
     # listicle detection
     is_listicle = bool(re.search(r'\btop\s+\d+\b|\bbest\b|\b\d+\s+(companies|tools|partners|platforms|vendors)\b', title))
@@ -172,6 +190,19 @@ def main():
 
     soft_hits = [w for w in SOFT_WORDS if re.search(r'\b' + re.escape(w) + r'\b', low)]
     report("Soft words (check for specifics): leverage/scalable", "warn" if soft_hits else True, ', '.join(soft_hits))
+
+    phrase_hits = [p for p in STYLE_PHRASES if p in low]
+    report("No style-guide empty phrases/cliches", "warn" if phrase_hits else True, ', '.join(phrase_hits))
+
+    # Accessibility: link text must be meaningful, never "click here"
+    badlink = re.findall(r'\[\s*(click here|click|here|read more|learn more)\s*\]\(', low)
+    report("Link text is descriptive (no 'click here')", "warn" if badlink else True,
+           ', '.join(sorted(set(badlink))))
+
+    # "you can" / "there is/are" weak constructions -> WARN (style guide)
+    weak = len(re.findall(r'\byou can\b', low)) + len(re.findall(r'\bthere (is|are|were)\b', low))
+    report("Direct phrasing (avoid 'you can' / 'there is-are')", "warn" if weak else True,
+           f"{weak} occurrence(s)")
 
     bad_head = []
     for lvl, h in headings:

@@ -1,8 +1,30 @@
 # Fixed Writing Rules (apply to every article, every channel)
 
-These are the "DO NOT MODIFY" rules from the prompt template. The audit script
-checks many of them mechanically, but write to them from the start — fixing after
-the fact produces flatter prose.
+**These operationalize the Damco Writing Style Guide (`damco-style-guide.md`, full PDF
+bundled in this folder). Read that first — it governs voice, casing, punctuation,
+perspective, parallelism, abbreviations, and accessibility on every channel.** The rules
+below are the "DO NOT MODIFY" prompt-template rules plus the style-guide essentials. The
+audit script checks many of them mechanically, but write to them from the start.
+
+## House rules (from the latest team feedback)
+- **No FAQ section on any channel.** Do not add FAQ / "People Also Ask" / "Questions ...
+  Ask" blocks. Answer those questions inside the body prose instead.
+- **Key Takeaways:** include a section headed exactly **"Key Takeaways"** immediately
+  after the title (before the intro) on every channel **except LinkedIn**, which uses no
+  Key Takeaways box. Three to six short, liftable bullets.
+- **No gendered pronouns:** use "they/their," never "he/his/she" generically.
+- **Never disparage** any technology, company, person, or opinion (no combative or
+  competitor-bashing framing).
+- **Eliminate "you can" and "there is/are/were."** State the action directly ("Install
+  the plugins," not "You can install the plugins").
+- **Parallelism:** keep list items in the same grammatical form.
+- **Active voice:** name who did the action.
+- **Abbreviations:** spell out in full with the abbreviation in parentheses on first use,
+  then use the abbreviation consistently.
+- **Accessibility:** meaningful link text only — never "click here"; hyperlink
+  descriptive words. Put key information near the top. Provide concise, descriptive alt
+  text for any image/infographic.
+- **Cite the source** of every statistic, quote, image, and claim.
 
 ## Sentence construction
 - One idea per sentence. Prefer subject-verb-object.
@@ -67,8 +89,11 @@ consequence. Mix these.
 - Vary bullet construction and length — not every bullet starts with a verb, not
   every bullet is the same length.
 
-## Em dashes
-- Maximum 2-3 per article. Prefer a comma or two sentences.
+## Em dashes and en dashes (per the Damco Style Guide)
+- Em dash (—): maximum 2-3 per article; prefer a comma or two sentences. When you do
+  use one, set off additional information with **no spaces** on either side.
+- En dash (–): use only for ranges (dates, pages, inclusive values), e.g. "2020-2024".
+- Do not use an em dash before a bullet's description; use a colon.
 
 ## Statistics & linking (NOT relaxed on any channel)
 - Use only 2025-2026 stats where available (LinkedIn: 2024-2026). Avoid older data
@@ -85,11 +110,15 @@ consequence. Mix these.
   list only.
 
 ## Structure (baseline; adjust section count to content, keep mandatory elements)
-1. **Intro (no heading):** open on the business problem or a cited number. Hook in
+1. **Title**, then immediately:
+2. **Key Takeaways** (heading exactly "Key Takeaways", 3-6 liftable bullets) on every
+   channel **except LinkedIn**, which omits it.
+3. **Intro (no heading):** open on the business problem or a cited number. Hook in
    the first sentence. 2-3 short paragraphs. Do not introduce yourself or the topic.
-2. **Body (H2/H3):** one clear idea per section; the last line of a section should
+4. **Body (H2/H3):** one clear idea per section; the last line of a section should
    make the next feel necessary. Lists for steps/criteria; tables for comparisons.
-3. **Conclusion (mandatory, 100-125 words):** summarize the argument in 2-3
+   **No FAQ section** — fold those questions into the prose.
+5. **Conclusion (mandatory, 100-125 words):** summarize the argument in 2-3
    sentences, include the primary keyword and the brand CTA hyperlink, close on a
    forward-looking point (or, on Medium/LinkedIn, a question that invites discussion).
    Do not use "Conclusion" as the literal heading.
