@@ -1,0 +1,19 @@
+{
+  "name": "damco-tools",
+  "owner": {
+    "name": "Damco Solutions Marketing",
+    "email": "claude-marketing@damcogroup.com"
+  },
+  "metadata": {
+    "description": "Internal Claude Code tools for the Damco content team."
+  },
+  "plugins": [
+    {
+      "name": "generate-article",
+      "source": "./plugins/generate-article",
+      "description": "Generate publication-ready Damco articles (.docx) from a keyword, title, and platform. Enforces the per-channel rules and the SEO compliance gate.",
+      "version": "1.0.0",
+      "author": { "name": "Damco Solutions Marketing" }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "generate-article",
+  "description": "Generate publication-ready Damco Solutions articles (.docx) from a keyword, title, and platform. Encodes the per-channel prompt rules (SEO Articles, Paid Guest Blog, Guest Blog, Medium, LinkedIn) and a hard SEO compliance gate built from the SEO team's feedback.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Damco Solutions Marketing",
+    "email": "claude-marketing@damcogroup.com"
+  },
+  "license": "UNLICENSED"
+}
