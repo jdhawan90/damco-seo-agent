@@ -107,10 +107,11 @@ def main():
         c = kw_count(body, kw)
         report(f"Secondary keyword used (>=1): '{kw}'", c >= 1 or "warn", f"{c}x")
 
-    # title contains a primary keyword
+    # title contains a primary keyword (title is user-provided, so WARN not FAIL)
     title = meta.get('title', '').lower()
-    ok = any(k.lower() in title for k in primaries) if primaries else "warn"
-    report("Primary keyword in title", ok)
+    has_kw_in_title = any(k.lower() in title for k in primaries) if primaries else False
+    report("Primary keyword in title (user-provided; WARN only)",
+           True if has_kw_in_title else "warn")
 
     # --- Statistics & sourcing --------------------------------------------
     links = re.findall(r'\[([^\]]+)\]\((https?://[^)\s]+)\)', body)
