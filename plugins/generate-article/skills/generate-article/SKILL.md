@@ -134,6 +134,47 @@ Tell the user: output path, word count, how many stats were cited (with sources)
 audit result, and anything that still needs a human (e.g. a designed infographic for
 LinkedIn, or a stat you couldn't verify and therefore dropped).
 
+## Batch mode (generate from an Excel of briefs)
+
+When the user points you at an Excel of article briefs (columns: Domain, Title,
+keywords-in-one-cell, Brief/Direction), process it row by row. The sheet has **no
+platform and no CTA column** — infer both.
+
+### Step B1 — Read and normalize the sheet
+```
+python .claude/skills/generate-article/scripts/read_batch.py <batch.xlsx> --manifest
+```
+This prints normalized rows (domain, inferred platform, title, primary/secondary
+keywords parsed from the combined cell, brief, and per-row flags) and writes a
+`<batch>_manifest.csv` next to the file. The manifest tracks `status` per row
+(pending / needs-review / done / failed) and **is resumable**: re-running skips rows
+already marked `done`. Platform is inferred via `reference/domain-map.md`.
+
+### Step B2 — Resolve per-row inputs
+For each row to process:
+- **Platform:** use the inferred value. If the row is flagged (unknown domain),
+  confirm the profile with the user once, or leave it `needs-review`.
+- **CTA URL:** infer from the keywords/title using the CTA table in
+  `reference/domain-map.md`, then verify the page is live. If you cannot confidently
+  match a Damco service page, mark the row `needs-review` rather than guessing a slug.
+- **Keywords flagged** "no Primary/Secondary labels": treat the list as primary and
+  proceed; note it.
+
+### Step B3 — Generate each row
+Run the normal Steps 1-6 for the row (research → write → audit → `.docx`), saving to
+`Generated/<Platform>/`. Then update the row in the manifest: set `status` to `done`
+(or `failed`), and fill `cta_url`, `output_file`, and any `notes`.
+
+### Step B4 — Chunked and resumable (this is how 100+ rows get done)
+A single session cannot hold 100 full generations. Process a **bounded chunk** per run
+(e.g. the user says "rows 1-15" or "the next 15 pending"). Each article still gets full
+research + the audit gate — never batch-skip quality. When the user says "continue the
+batch," re-read the manifest and process the next pending rows. Report a short table at
+the end of each chunk: row, title, platform, status, file, anything needing a human.
+
+For a much faster run over many rows, a parallel multi-agent workflow (one agent per
+row) is possible but spends far more tokens; only do that if the user explicitly asks.
+
 ## Infographics (LinkedIn especially)
 LinkedIn requires at least one functional visual (scorecard / process flow / stat band /
 comparison) in brand palette (navy #1F3864, teal #2A9D8F). If image tooling is
