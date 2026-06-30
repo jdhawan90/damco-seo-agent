@@ -30,26 +30,29 @@ Code build, including the desktop app). Pick whichever method fits.
 
 ### Method A — Personal skill (recommended; works in every project, per person)
 
-Run once per teammate. Clone the repo (or download it as a ZIP from GitHub), then copy
-the skill folder into your user-level skills directory:
+Clone the repo once, then run the install script. **The same script installs and
+updates** — re-run it any time to pull the latest and refresh your local copy.
+
+```
+git clone https://github.com/jdhawan90/damco-seo-agent.git
+```
 
 **Windows (PowerShell):**
 ```
-git clone https://github.com/jdhawan90/damco-seo-agent.git
-Copy-Item -Recurse -Force `
-  "damco-seo-agent\plugins\generate-article\skills\generate-article" `
-  "$env:USERPROFILE\.claude\skills\generate-article"
+powershell -ExecutionPolicy Bypass -File damco-seo-agent\plugins\generate-article\install-skill.ps1
 ```
 
 **macOS / Linux:**
 ```
-git clone https://github.com/jdhawan90/damco-seo-agent.git
-mkdir -p ~/.claude/skills
-cp -r damco-seo-agent/plugins/generate-article/skills/generate-article ~/.claude/skills/generate-article
+bash damco-seo-agent/plugins/generate-article/install-skill.sh
 ```
 
-Restart the Claude Code desktop app. `/generate-article` is now available in every
-project you open. To update later: `git pull` and re-run the copy command.
+The script does three things: `git pull` the latest, copy the skill into your personal
+`~/.claude/skills/generate-article`, and check that `python-docx` is installed. Restart
+the Claude Code desktop app and `/generate-article` is available in every project.
+
+**To update later:** just run the same install-skill script again. That is the whole
+update step.
 
 ### Method B — Open this repo (zero copying)
 
@@ -72,10 +75,19 @@ is available with no copy step. `git pull` keeps it current.
 
 Then give it: platform + title + primary keyword (everything else is optional).
 
-## Updating
+## Updating (how teammates get your changes)
 
-Maintainer: update the skill, commit, and push. Teammates re-`git pull` and (for
-Method A) re-copy, or `/plugin marketplace update damco-tools` for Method C.
+Skills are pull-based; there is no automatic push. When the maintainer pushes an update:
+
+- **Method A:** re-run `install-skill.ps1` / `install-skill.sh`. It pulls and re-copies
+  in one step. (Tip: tell the team "an update is live, re-run the install script.")
+- **Method B (opened the repo):** just `git pull`. The skill is read in place, so the
+  pull *is* the update — nothing to copy.
+- **Method C (`/plugin`):** `/plugin marketplace update damco-tools`.
+
+Maintainer workflow: edit the skill, commit, and push to `main`. Optionally bump the
+`version` in `.claude-plugin/marketplace.json` and `.claude-plugin/plugin.json` so
+Method C users see a new version.
 
 ## Optional: auto-enable org-wide
 
