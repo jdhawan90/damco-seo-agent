@@ -207,32 +207,32 @@ def match_and_store(gsc_data: list[dict], lookback_days: int, dry_run: bool = Fa
 def _safe_console(s: str | None) -> str:
     """
     Sanitize a string for the Windows cp1252 console when stdout is
-    redirected. Two passes: strip known invisible/non-break whitespace
-    chars, then encode-replace anything else stdout can't render. The
-    DB rows still hold the original keyword text — this only sanitizes
-    terminal display.
+    redirected. Three passes:
+      1. Normalize visible-whitespace unicode (NBSP, NNBSP, etc.) to a
+         regular ASCII space. These are word separators — deleting them
+         would mash adjacent words together ('machine learning' ->
+         'machinelearning').
+      2. Delete truly invisible joiners (zero-width-space etc.) — they
+         have no spatial meaning and removing them is correct.
+      3. Backstop: encode-replace anything still un-encodable on the
+         current stdout encoding so we never throw UnicodeEncodeError.
+    The DB rows still hold the original keyword text — this only
+    sanitizes terminal display.
     """
     if not s:
         return ""
-    for ch in (
-        "​",  # ZERO WIDTH SPACE
-        "‌",  # ZERO WIDTH NON-JOINER
-        "‍",  # ZERO WIDTH JOINER
-        "⁠",  # WORD JOINER
-        "﻿",  # ZERO WIDTH NO-BREAK SPACE (BOM)
-        " ",  # NO-BREAK SPACE
-        " ",  # NARROW NO-BREAK SPACE
-        " ",  # FIGURE SPACE
-        " ",  # THIN SPACE
-        "᠎",  # MONGOLIAN VOWEL SEPARATOR
-    ):
+    # Pass 1: visible-whitespace unicode -> regular space.
+    for ch in (" ", " ", " ", " ", " ", " ", " ", "　"):
+        s = s.replace(ch, " ")
+    # Pass 2: truly invisible joiners -> delete.
+    for ch in ("​", "‌", "‍", "⁠", "﻿", "᠎"):
         s = s.replace(ch, "")
+    # Pass 3: encode-replace anything else stdout's encoding can't render.
     enc = (sys.stdout.encoding or "utf-8")
     try:
         return s.encode(enc, errors="replace").decode(enc, errors="replace")
     except (LookupError, UnicodeError):
         return s.encode("ascii", errors="replace").decode("ascii")
-
 
 def print_summary(stats: dict, lookback_days: int) -> None:
     """Print a console summary of the GSC enrichment run."""
