@@ -22,34 +22,60 @@ The article-to-`.docx` step uses Python and `python-docx`.
 Without Python, the skill still researches and writes the article, but the final
 `.docx` conversion will fail.
 
-## Install (each teammate runs once)
+## Install
+
+A skill is just files in a `.claude/skills/` folder that Claude Code auto-discovers.
+It does **not** require the `/plugin` command (which is not available in every Claude
+Code build, including the desktop app). Pick whichever method fits.
+
+### Method A — Personal skill (recommended; works in every project, per person)
+
+Run once per teammate. Clone the repo (or download it as a ZIP from GitHub), then copy
+the skill folder into your user-level skills directory:
+
+**Windows (PowerShell):**
+```
+git clone https://github.com/jdhawan90/damco-seo-agent.git
+Copy-Item -Recurse -Force `
+  "damco-seo-agent\plugins\generate-article\skills\generate-article" `
+  "$env:USERPROFILE\.claude\skills\generate-article"
+```
+
+**macOS / Linux:**
+```
+git clone https://github.com/jdhawan90/damco-seo-agent.git
+mkdir -p ~/.claude/skills
+cp -r damco-seo-agent/plugins/generate-article/skills/generate-article ~/.claude/skills/generate-article
+```
+
+Restart the Claude Code desktop app. `/generate-article` is now available in every
+project you open. To update later: `git pull` and re-run the copy command.
+
+### Method B — Open this repo (zero copying)
+
+This repo also ships the skill at its top-level `.claude/skills/generate-article/`. If
+you clone this repo and open it as your working folder in Claude Code, `/generate-article`
+is available with no copy step. `git pull` keeps it current.
+
+### Method C — Plugin marketplace (only if your build has `/plugin`)
 
 ```
 /plugin marketplace add jdhawan90/damco-seo-agent
 /plugin install generate-article@damco-tools
 ```
 
-`jdhawan90/damco-seo-agent` is the GitHub repo hosting this marketplace, and
-`damco-tools` is the marketplace name (from `.claude-plugin/marketplace.json`). For a
-non-GitHub git host, use the full clone URL instead of the `owner/repo` shorthand.
-
 ## Use
 
 ```
-/generate-article:generate-article
+/generate-article
 ```
 
 Then give it: platform + title + primary keyword (everything else is optional).
 
 ## Updating
 
-Maintainer: bump the `version` in `.claude-plugin/marketplace.json` and in
-`plugins/generate-article/.claude-plugin/plugin.json`, commit, and push.
-
-Teammates pick up updates with:
-```
-/plugin marketplace update damco-tools
-```
+Maintainer: update the skill, commit, and push. Teammates re-`git pull` and (for
+Method A) re-copy, or `/plugin marketplace update damco-tools` for Method C.
 
 ## Optional: auto-enable org-wide
 
