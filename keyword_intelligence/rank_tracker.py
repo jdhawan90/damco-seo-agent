@@ -787,15 +787,37 @@ def refresh_offering_rollup() -> None:
 
 def _safe_console(s: str | None) -> str:
     """
-    Strip characters that crash the Windows cp1252 console when stdout
-    is redirected (zero-width-space etc.). The DB rows still hold the
-    original keyword text — this only sanitizes terminal display.
+    Sanitize a string for the Windows cp1252 console when stdout is
+    redirected. Two passes:
+      1. Strip known invisible/non-break whitespace chars that have no
+         glyph in cp1252 (zero-width-space, narrow no-break space, etc.).
+      2. As a backstop, encode-replace anything still un-encodable on
+         the current stdout encoding so we never throw UnicodeEncodeError.
+    The DB rows still hold the original keyword text — this only
+    sanitizes terminal display.
     """
     if not s:
         return ""
-    for ch in ("​", "‌", "‍", "﻿"):
+    # Pass 1: strip the usual suspects outright (cleaner output than '?').
+    for ch in (
+        "​",  # ZERO WIDTH SPACE
+        "‌",  # ZERO WIDTH NON-JOINER
+        "‍",  # ZERO WIDTH JOINER
+        "⁠",  # WORD JOINER
+        "﻿",  # ZERO WIDTH NO-BREAK SPACE (BOM)
+        " ",  # NO-BREAK SPACE
+        " ",  # NARROW NO-BREAK SPACE
+        " ",  # FIGURE SPACE
+        " ",  # THIN SPACE
+        "᠎",  # MONGOLIAN VOWEL SEPARATOR
+    ):
         s = s.replace(ch, "")
-    return s
+    # Pass 2: encode-replace anything else stdout's encoding can't render.
+    enc = (sys.stdout.encoding or "utf-8")
+    try:
+        return s.encode(enc, errors="replace").decode(enc, errors="replace")
+    except (LookupError, UnicodeError):
+        return s.encode("ascii", errors="replace").decode("ascii")
 
 
 def print_summary(results: list[dict], run_date: date) -> None:
