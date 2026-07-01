@@ -118,15 +118,19 @@ def main():
     report("Primary keyword in title (user-provided; WARN only)",
            True if has_kw_in_title else "warn")
 
-    # --- Statistics & sourcing --------------------------------------------
+    # --- Statistics & external links (SEO team cap: no more than 3-4) ------
     links = re.findall(r'\[([^\]]+)\]\((https?://[^)\s]+)\)', body)
-    # statistics ~ inline links sitting near a number; count all external links as proxy
-    body_links = [l for l in links if 'damcogroup.com' not in l[1] and 'achieva.ai' not in l[1]]
-    nstats = len(body_links)
-    min_stats = 5 if plat in ('linkedin', 'linkedin.com') else 3
-    ok = nstats >= min_stats
-    fails += not ok
-    report(f"Inline cited stat-links (>= {min_stats})", ok, f"{nstats} external citation links")
+    ext = [l[1] for l in links if 'damcogroup.com' not in l[1] and 'achieva.ai' not in l[1]]
+    uniq_ext = sorted(set(ext))
+    n_uniq, n_total = len(uniq_ext), len(ext)
+    over_cap = n_uniq > 4
+    fails += over_cap
+    report("External links <= 4 (SEO team cap)", not over_cap,
+           f"{n_uniq} unique external links" + ("  OVER CAP — cut to 3-4" if over_cap else ""))
+    report("At least 2 external sources cited", (n_uniq >= 2) or "warn", f"{n_uniq} sources")
+    dupes = n_total - n_uniq
+    report("Each external source linked once (no repeat links)",
+           (dupes == 0) or "warn", f"{dupes} repeat link(s)" if dupes else "")
 
     has_sources = bool(re.search(r'^#{2,3}\s+sources', body, re.MULTILINE | re.IGNORECASE))
     fails += not has_sources
@@ -140,6 +144,25 @@ def main():
 
     # --- Structure ---------------------------------------------------------
     is_linkedin = plat in ('linkedin', 'linkedin.com')
+
+    # No content tables in the article body (SEO team). The auto-generated SEO
+    # metadata block and keyword-frequency table are editorial appendices built by
+    # the converter, not written as markdown pipes, so they are not caught here.
+    table_rows = re.findall(r'^\s*\|.*\|\s*$', body, re.MULTILINE)
+    fails += bool(table_rows)
+    report("No tables in article body (SEO team: no tabular data)", not table_rows,
+           f"{len(table_rows)} table row(s) — rewrite as prose or a list" if table_rows else "")
+
+    # First-person voice allowed only on LinkedIn (Damco Style Guide + SEO team)
+    if is_linkedin:
+        report("First-person voice allowed (LinkedIn)", True)
+    else:
+        fp = re.findall(r"\bI\b|\bI['’]m\b|\bI['’]ve\b", body)
+        fp += re.findall(r"\b(?:we|we['’]re|we['’]ve|our|ours|my)\b", body, re.IGNORECASE)
+        fails += bool(fp)
+        report("No first-person voice (only LinkedIn may use it)", not fp,
+               f"{len(fp)} first-person word(s): " + ', '.join(sorted(set(w.lower() for w in fp)))[:60]
+               if fp else "")
 
     # Key Takeaways: required (heading) on all channels EXCEPT LinkedIn
     kt_heading = bool(re.search(r'^#{2,4}\s*key takeaways', body, re.IGNORECASE | re.MULTILINE))

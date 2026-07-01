@@ -7,6 +7,14 @@ below are the "DO NOT MODIFY" prompt-template rules plus the style-guide essenti
 audit script checks many of them mechanically, but write to them from the start.
 
 ## House rules (from the latest team feedback)
+- **No tables / tabular data in the article body, any channel.** No comparison tables,
+  no data tables. Present comparisons as prose or short lists. (The SEO metadata block
+  and keyword-frequency table are internal appendices, not article content.)
+- **No more than 3-4 external links.** Cite at most 3-4 distinct external sources, each
+  linked once. Do not repeat an external link or hyperlink every statistic. The brand
+  CTA is a self-link and is exempt from the cap.
+- **First person (I, we, our) only on LinkedIn.** Every other channel uses second person
+  (you) or third person (Damco, the team). Never first person off LinkedIn.
 - **No FAQ section on any channel.** Do not add FAQ / "People Also Ask" / "Questions ...
   Ask" blocks. Answer those questions inside the body prose instead.
 - **Key Takeaways:** include a section headed exactly **"Key Takeaways"** immediately
@@ -82,6 +90,8 @@ consequence. Mix these.
 - Capitalize proper product/platform names consistently (Salesforce, Lightning
   Experience, Dynamics 365).
 - Oxford comma in all lists of three or more.
+- No tables or tabular data in the article body (use prose or lists).
+- First person (I, we, our) only on LinkedIn; other channels use second or third person.
 - Numbers one to nine: spell out. 10 and above: numerals.
 - Paragraphs: 100-200 words, three to six sentences. No standalone one-sentence
   paragraphs unless deliberate emphasis.
@@ -101,7 +111,9 @@ consequence. Mix these.
 - **Primary sources only:** the brand's own published data, IBM, Gartner, McKinsey,
   Forrester, IDC, government bodies, peer-reviewed research. No aggregators, no
   competitor blogs.
-- Hyperlink every statistic inline to its source page. Verify the page is live
+- **Cap: no more than 3-4 external links.** Cite 3-4 distinct external sources and link
+  each once. If several figures come from one source, link it once, not per-figure.
+  Verify the page is live
   before using it (a site that blocks bots but returns current content in search is
   live, not a 404). If a URL can't be confirmed live, drop the stat.
 - **Never link to competitor websites.** The brand CTA is the only company page you
@@ -116,7 +128,8 @@ consequence. Mix these.
 3. **Intro (no heading):** open on the business problem or a cited number. Hook in
    the first sentence. 2-3 short paragraphs. Do not introduce yourself or the topic.
 4. **Body (H2/H3):** one clear idea per section; the last line of a section should
-   make the next feel necessary. Lists for steps/criteria; tables for comparisons.
+   make the next feel necessary. Lists for steps/criteria; comparisons as prose or a
+   short list, never a table.
    **No FAQ section** — fold those questions into the prose.
 5. **Conclusion (mandatory, 100-125 words):** summarize the argument in 2-3
    sentences, include the primary keyword and the brand CTA hyperlink, close on a

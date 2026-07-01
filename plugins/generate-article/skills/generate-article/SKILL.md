@@ -55,10 +55,18 @@ channel), `reference/channel-profiles.md` (the row for this platform),
 `reference/writing-rules.md` (applies to all channels), and — if the title is a
 listicle ("Top N", "Best", "N Companies/Tools/Partners") — `reference/listicle-rules.md`.
 
-House rules now in force: **no FAQ section on any channel**; a **"Key Takeaways"**
-section (clear heading) goes immediately after the title on every channel **except
-LinkedIn**; LinkedIn / Medium / guest blogs use a **thought-leadership tone and flow**
-(confident first-person/we-voice, opinion backed by evidence, a narrative that builds).
+House rules now in force:
+- **No tables / tabular data** in the article body, any channel (comparisons go in prose
+  or short lists). The metadata block and keyword-frequency table are internal appendices.
+- **No more than 3-4 external links** total; cite 3-4 distinct sources, each linked once,
+  and do not hyperlink every stat. The brand CTA is exempt.
+- **First person (I, we, our) only on LinkedIn.** All other channels use second person
+  (you) or third person (Damco, the team).
+- **No FAQ section** on any channel.
+- A **"Key Takeaways"** section (clear heading) goes immediately after the title on every
+  channel **except LinkedIn**.
+- LinkedIn / Medium / guest blogs use a **thought-leadership tone and flow** (opinion
+  backed by evidence, a narrative that builds); only LinkedIn may use first-person voice.
 
 ### Step 1 — Build the search-intent map (this is what was missing)
 Start from the **direction/brief**: it tells you why this title was chosen and the angle
@@ -93,9 +101,12 @@ Then:
 - Intro (no heading): business problem + thesis, objective tone, keyword in first two paras.
 - `> ` definition callout for the central term where it helps.
 - Body H2/H3 covering the Step-1 intent map; **at least one H2 contains the primary
-  keyword**. Inline-cite every stat as `[claim text](https://source-url)`. **No FAQ
+  keyword**. Cite **3-4 distinct external sources max, each linked once** as
+  `[claim text](https://source-url)` — do not link every stat, do not exceed 4. **No FAQ
   section** — fold those questions into the prose.
-- Comparison table(s) where they earn their place; numbered lists for processes.
+- Numbered lists for processes; convey comparisons as prose or short lists. **No tables.**
+- Perspective: second or third person on all channels except LinkedIn (first person is
+  LinkedIn-only).
 - Conclusion (100-125 words, no "Conclusion" heading): primary keyword + CTA link +
   forward-looking close (or a discussion question on Medium/LinkedIn).
 - `## Sources` list: source name + URL + publication year for every cited stat.
@@ -175,19 +186,20 @@ the end of each chunk: row, title, platform, status, file, anything needing a hu
 For a much faster run over many rows, a parallel multi-agent workflow (one agent per
 row) is possible but spends far more tokens; only do that if the user explicitly asks.
 
-## Infographics (LinkedIn especially)
-LinkedIn requires at least one functional visual (scorecard / process flow / stat band /
-comparison) in brand palette (navy #1F3864, teal #2A9D8F). If image tooling is
-available, generate a clean PNG and embed it; otherwise render the same content as a
-formatted comparison table and flag in Step 7 that a designed visual should replace it.
-Functional only — never decorative.
+## Infographics (LinkedIn only, optional)
+On LinkedIn you may include one functional visual (scorecard / process flow / stat band)
+in brand palette (navy #1F3864, teal #2A9D8F), as a rendered image with concise alt text.
+An infographic is a visual, not a table. If image tooling is unavailable, convey the same
+content as prose or a short list — never as a table. Functional only, never decorative.
 
 ## Non-negotiables (from SEO + style-guide feedback)
 - Follow the Damco Writing Style Guide on every channel (`reference/damco-style-guide.md`).
+- **No tables / tabular data** in the article body, any channel.
+- **No more than 3-4 external links**, each distinct source linked once. Brand CTA exempt.
+- **First person only on LinkedIn**; all other channels are second or third person.
 - Meta description on every article.
 - Primary keyword in the title AND at least one H2.
-- 5+ inline-cited primary-source stats (3+ on non-LinkedIn channels), each linked at
-  the point of use, year only in Sources.
+- Cite 3-4 primary-source stats, year only in Sources (never exceed the external-link cap).
 - Full search-intent coverage including compliance/security and current trends where
   relevant — the thesis organizes the coverage, it does not replace it.
 - **No FAQ section on any channel.** Fold those questions into the prose.

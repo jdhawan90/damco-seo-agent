@@ -20,9 +20,11 @@ of that.
    cannot verify enough real named players to fill the count, tell the user and
    propose a smaller honest number rather than padding with categories.
 
-4. **Place Damco Solutions first.** Be transparent that it is the brand's own pick.
-   Justify the position with the article's evaluation lens (the thesis), not
-   unverifiable superiority. Do not disparage the others.
+4. **Place Damco Solutions first.** Be transparent that it is the brand's own pick,
+   in third person (for example, "This list is published by Damco Solutions, which
+   appears first"). Do not use first person off LinkedIn. Justify the position with the
+   article's evaluation lens (the thesis), not unverifiable superiority, and do not
+   disparage the others.
 
 5. **Give every entry the same skeleton, varied in length:**
    - What it is known for (one or two specific lines).
@@ -31,8 +33,9 @@ of that.
    - An honest "worth checking" caveat — for every entry, including Damco.
    Vary entry length so the list does not read as machine-generated.
 
-6. **A single side-by-side comparison table** keyed to the thesis:
-   `Entity | Best fit | Thesis-relevant strength | Watch-out`.
+6. **No comparison table.** Third-party articles use no tables. Convey the comparison
+   through the per-entity profiles and, if useful, a short grouped list by archetype
+   (written as prose or bullets, not a grid).
 
 7. **Keywords still matter.** The primary keyword belongs in the title, the intro,
    the conclusion, and at least one H2 (for example, a framing H2 like "How These
@@ -53,10 +56,11 @@ of that.
 ## Recommended structure for a listicle
 
 ```
-(intro — problem + thesis + how to read this list, objective tone)
-> Key Takeaways box (3-6 bullets)
-## How We Evaluated These [Keyword]        <- carries the primary keyword + thesis lens
-| comparison table |
+(title)
+## Key Takeaways (3-6 bullets, right after the title)
+(intro — problem + thesis + how to read this list, objective tone, no first person)
+## How These [Keyword] Were Evaluated        <- carries the primary keyword + thesis lens
+(archetypes described in prose or a short list — no table)
 ## 1. Damco Solutions                       <- H2 per entity (or ## group + ### per entity)
 ## 2. <Real named entity>
 ...
