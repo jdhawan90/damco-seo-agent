@@ -8,11 +8,10 @@ profile from the domain. `scripts/read_batch.py` applies this map; keep the two 
 | `linkedin.com` | LinkedIn | Long-form thought leadership; no Key Takeaways box. |
 | `medium.com` | Medium | Conversational thought-leadership. |
 | `damcogroup.com` (and the Damco blog) | SEO Articles | On-site SEO blog. |
-| `sooperarticles.com` | SEO Articles | SEO-depth guest placement (full SEO rules). |
-| `woxmax.com` | Guest Blog | External guest post. |
-| **any other / unknown** | Guest Blog (default) | **Flag the row** so a human confirms the profile before publishing. |
+| **any other domain, or "[PUBLISHING PLATFORM TBD]"** | **SEO Articles (default)** | Team's blanket batch decision: article directories and undecided rows are written as SEO-depth guest articles (full SEO rules: thesis + complete intent coverage, Key Takeaways, second person). |
 
-To add a domain: put it in `DOMAIN_PROFILE` in `read_batch.py` and in the table above.
+To change the special-cased domains, edit `DOMAIN_PROFILE` in `read_batch.py`; to change
+the blanket default, edit `DEFAULT_PROFILE`. LinkedIn and Medium stay auto-detected.
 
 ## CTA inference (no CTA column in the batch)
 

@@ -26,15 +26,16 @@ import re
 import json
 import csv
 
-# Domain -> channel profile (see reference/domain-map.md)
+# Domain -> channel profile (see reference/domain-map.md).
+# LinkedIn and Medium are special; everything else (article directories, guest sites,
+# and "[PUBLISHING PLATFORM TBD]" rows) uses the SEO-depth default (SEO Articles rules),
+# per the team's blanket decision for batch runs.
 DOMAIN_PROFILE = {
     'linkedin.com': 'LinkedIn',
     'medium.com': 'Medium',
     'damcogroup.com': 'SEO Articles',
-    'sooperarticles.com': 'SEO Articles',   # SEO-depth guest placement
-    'woxmax.com': 'Guest Blog',
 }
-DEFAULT_PROFILE = 'Guest Blog'
+DEFAULT_PROFILE = 'SEO Articles'
 
 HEADER_ALIASES = {
     'domain': ['domain name', 'domain', 'website', 'site', 'publishing platform', 'publication'],
@@ -56,8 +57,8 @@ def profile_for_domain(domain):
     d = norm_domain(domain)
     for key, prof in DOMAIN_PROFILE.items():
         if d == key or d.endswith('.' + key) or key in d:
-            return prof, False
-    return DEFAULT_PROFILE, True   # (profile, is_unknown)
+            return prof
+    return DEFAULT_PROFILE   # article directories + TBD -> SEO-depth (intentional policy)
 
 
 def split_terms(s):
@@ -136,11 +137,9 @@ def main():
         title = cell('title')
         if not (domain or title):
             continue                              # skip blank rows
-        profile, unknown = profile_for_domain(domain)
+        profile = profile_for_domain(domain)
         primary, secondary, kflags = parse_keywords(cell('keywords'))
-        flags = list(kflags)
-        if unknown:
-            flags.append(f"unknown domain '{norm_domain(domain)}' -> defaulted to {DEFAULT_PROFILE}; confirm")
+        flags = list(kflags)   # blocking issues only -> drive 'needs-review'
         if not title:
             flags.append('missing title')
         records.append({
