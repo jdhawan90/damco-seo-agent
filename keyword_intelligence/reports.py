@@ -214,7 +214,8 @@ def build_summary_sheet(wb: Workbook, data: dict) -> None:
 
 
 def build_detailed_sheet(wb: Workbook, data: dict) -> None:
-    """Sheet 2: Wide-format table with SERP rank + GSC metrics side by side."""
+    """Sheet 2: Wide-format table with SERP rank + currently-ranking URL +
+    GSC metrics side by side."""
     ws = wb.create_sheet("Detailed Rankings")
 
     dates = data["dates"]
@@ -224,10 +225,11 @@ def build_detailed_sheet(wb: Workbook, data: dict) -> None:
     # Check if any GSC data exists
     has_gsc = any(kw_data["gsc"] for kw_data in by_keyword.values())
 
-    # Headers: Keyword | Offering | date1 | date2 | ... | GSC Avg Pos | GSC Clicks | GSC Impr | GSC CTR
+    # Headers: Keyword | Offering | date1 | date2 | ... | Currently Ranking URL | Target URL | GSC block
     headers = ["Keyword", "Offering"] + [
         d.isoformat() if isinstance(d, date) else str(d) for d in dates
     ]
+    headers += ["Currently Ranking URL", "Target URL"]
     if has_gsc:
         headers += ["GSC Avg Pos (14d)", "GSC Clicks", "GSC Impressions", "GSC CTR"]
 
@@ -235,7 +237,9 @@ def build_detailed_sheet(wb: Workbook, data: dict) -> None:
         ws.cell(row=1, column=col, value=h)
     _style_header(ws, 1, len(headers))
 
-    gsc_start_col = 3 + len(dates)  # first GSC column
+    url_col = 3 + len(dates)                # Currently Ranking URL
+    target_col = url_col + 1                # Target URL (assigned)
+    gsc_start_col = target_col + 1          # first GSC column (only if has_gsc)
 
     for i, kw in enumerate(keywords, 2):
         kw_data = by_keyword[kw]
@@ -244,12 +248,18 @@ def build_detailed_sheet(wb: Workbook, data: dict) -> None:
         ws.cell(row=i, column=2, value=kw_data["offering"])
         ws.cell(row=i, column=2).border = THIN_BORDER
 
-        # DataForSEO SERP positions
+        # DataForSEO SERP positions across every snapshot date
+        latest_url_found = None
+        latest_seen_date = None
         for j, d in enumerate(dates, 3):
             ranking = kw_data["rankings"].get(d)
             if ranking:
                 pos = ranking["position"]
                 val = pos if pos is not None else "N/F"
+                # Track most recent URL that ranked
+                if ranking.get("url_found") and (latest_seen_date is None or d > latest_seen_date):
+                    latest_url_found = ranking["url_found"]
+                    latest_seen_date = d
             else:
                 val = ""
             ws.cell(row=i, column=j, value=val)
@@ -262,6 +272,23 @@ def build_detailed_sheet(wb: Workbook, data: dict) -> None:
                     cell.fill = GOOD_FILL
                 elif val <= 20:
                     cell.fill = STRIKING_FILL
+
+        # Currently Ranking URL — the url_found from the most recent snapshot
+        # where a URL was recorded. Empty when Damco never ranked.
+        ws.cell(row=i, column=url_col, value=latest_url_found or "")
+        ws.cell(row=i, column=url_col).border = THIN_BORDER
+        ws.cell(row=i, column=url_col).alignment = Alignment(horizontal="left", wrap_text=False)
+
+        # Target URL (assigned) — from keywords.target_url. Highlights when
+        # actually-ranking URL diverges from the one the team assigned.
+        target_url = kw_data.get("target_url") or ""
+        ws.cell(row=i, column=target_col, value=target_url)
+        ws.cell(row=i, column=target_col).border = THIN_BORDER
+        ws.cell(row=i, column=target_col).alignment = Alignment(horizontal="left", wrap_text=False)
+        # Flag mismatches (both present, but different) — useful for canonical audits
+        if latest_url_found and target_url and latest_url_found.rstrip("/").lower() != target_url.rstrip("/").lower():
+            ws.cell(row=i, column=url_col).fill = STRIKING_FILL
+            ws.cell(row=i, column=target_col).fill = STRIKING_FILL
 
         # GSC metrics — use the latest GSC date available for this keyword
         if has_gsc:
@@ -294,11 +321,17 @@ def build_detailed_sheet(wb: Workbook, data: dict) -> None:
     ws.column_dimensions["B"].width = 25
     for col in range(3, 3 + len(dates)):
         ws.column_dimensions[get_column_letter(col)].width = 14
+    ws.column_dimensions[get_column_letter(url_col)].width = 60
+    ws.column_dimensions[get_column_letter(target_col)].width = 60
     if has_gsc:
         ws.column_dimensions[get_column_letter(gsc_start_col)].width = 18
         ws.column_dimensions[get_column_letter(gsc_start_col + 1)].width = 12
         ws.column_dimensions[get_column_letter(gsc_start_col + 2)].width = 14
         ws.column_dimensions[get_column_letter(gsc_start_col + 3)].width = 10
+
+    # Freeze first two columns so the keyword+offering stay visible while scrolling
+    ws.freeze_panes = "C2"
+    ws.auto_filter.ref = ws.dimensions
 
 
 def build_movement_sheet(wb: Workbook, data: dict) -> None:
