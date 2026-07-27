@@ -88,6 +88,11 @@ class Settings:
     CLAUDE_MODEL_DEFAULT: str
     CLAUDE_MODEL_COMPLEX: str
 
+    # Embeddings (optional). Anthropic has no embeddings endpoint; Voyage is
+    # their recommended partner. Unset simply means semantic similarity is
+    # unavailable and callers fall back to token matching.
+    VOYAGE_API_KEY: str
+
     # Notifications (all optional)
     SLACK_WEBHOOK_URL: str
     SMTP_HOST: str
@@ -124,6 +129,8 @@ def _load() -> Settings:
         GSC_SITE_URL=_optional("GSC_SITE_URL"),
 
         PAGESPEED_API_KEY=_optional("PAGESPEED_API_KEY"),
+
+        VOYAGE_API_KEY=_optional("VOYAGE_API_KEY"),
 
         ANTHROPIC_API_KEY=_optional("ANTHROPIC_API_KEY"),
         CLAUDE_MODEL_CHEAP=_optional("CLAUDE_MODEL_CHEAP", "claude-haiku-4-5-20251001"),

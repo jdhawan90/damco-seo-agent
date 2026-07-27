@@ -25,6 +25,7 @@ Thread safety
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -42,13 +43,22 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_AGENT = "DamcoSEOBot/1.0 (+https://www.damcogroup.com/; SEO ops monitoring)"
+# Unbranded fallback only. The real identity comes from the tenant profile via
+# default_user_agent(), resolved when a Crawler is built — this module is
+# imported far too widely to hit the database at import time.
+DEFAULT_USER_AGENT = "SEOBot/1.0 (SEO ops monitoring)"
 DEFAULT_TIMEOUT_SEC = 20
 DEFAULT_RATE_LIMIT_SEC = 1.0
 DEFAULT_MAX_BODY_BYTES = 5 * 1024 * 1024  # 5 MB
 HTML_CONTENT_TYPES = ("text/html", "application/xhtml+xml")
 
 _WHITESPACE_RE = re.compile(r"\s+")
+
+
+def default_user_agent() -> str:
+    """Tenant crawler identity, falling back to DEFAULT_USER_AGENT."""
+    from common.tenant import crawler_user_agent   # local: keeps import DB-free
+    return crawler_user_agent(DEFAULT_USER_AGENT)
 
 
 class CrawlError(RuntimeError):
@@ -84,17 +94,22 @@ class CrawlResult:
     links: list[dict[str, str | bool | None]] = field(default_factory=list)
     word_count: int = 0
 
+    # sha256 of the normalized visible text. Lets callers detect a real body
+    # change without keeping the body around.
+    text_hash: str | None = None
+
 
 class Crawler:
     def __init__(
         self,
         *,
-        user_agent: str = DEFAULT_USER_AGENT,
+        user_agent: str | None = None,
         timeout_sec: int = DEFAULT_TIMEOUT_SEC,
         rate_limit_sec: float = DEFAULT_RATE_LIMIT_SEC,
         max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
         respect_robots: bool = True,
     ) -> None:
+        user_agent = user_agent or default_user_agent()
         self.user_agent = user_agent
         self.timeout_sec = timeout_sec
         self.rate_limit_sec = rate_limit_sec
@@ -317,11 +332,24 @@ def _populate_extracts(result: CrawlResult) -> None:
             "is_internal": link_origin == base_origin,
         })
 
-    # Word count from visible text (strip script/style)
+    # Word count and content hash from visible text (strip script/style)
     for tag in soup(["script", "style", "noscript", "template"]):
         tag.decompose()
     text = soup.get_text(" ", strip=True)
     result.word_count = len(text.split()) if text else 0
+
+    # Hash the visible text so callers can detect a real body change without
+    # storing the body. Whitespace- and case-normalized, so reflowed markup
+    # or a re-indent does not read as an edit.
+    #
+    # competitor_monitor previously approximated this as
+    # "wc=<n>|title|meta|h1", which meant a competitor could rewrite an entire
+    # page, keep the word count on the same integer and the title fixed, and
+    # never trigger a change event.
+    result.text_hash = (
+        hashlib.sha256(" ".join(text.lower().split()).encode("utf-8")).hexdigest()
+        if text else None
+    )
 
 
 def _origin(url: str) -> str:
@@ -361,5 +389,5 @@ __all__ = [
     "Crawler", "CrawlResult", "CrawlError",
     "DEFAULT_USER_AGENT", "DEFAULT_TIMEOUT_SEC",
     "DEFAULT_RATE_LIMIT_SEC", "DEFAULT_MAX_BODY_BYTES",
-    "fetch", "get_default_crawler",
+    "default_user_agent", "fetch", "get_default_crawler",
 ]

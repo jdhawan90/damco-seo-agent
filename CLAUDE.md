@@ -12,17 +12,34 @@ For the full architecture see the `Damco_SEO_AI_Agent_Architecture` document (st
 
 ## Agent directory
 
-| Folder | Domain | Phase | Status |
-|---|---|---|---|
-| `keyword_intelligence/` | Keyword rank tracking (DataForSEO + GSC dual-lens) + trend discovery | 1–2 | **Active** |
-| `technical_seo/` | Site audits, Core Web Vitals, internal linking, sitemap/robots validation | 1 | Planned |
-| `offpage_links/` | Backlink tracking, platform discovery, outreach drafting | 1–3 | Planned |
-| `content_operations/` | Content briefs, compliance checks, glossary gaps | 2 | Planned |
-| `competitive_intelligence/` | Competitor monitoring, backlink profiling, gap analysis | 2 | Planned |
-| `content_assets/` | Whitepapers, slide decks, video scripts, infographics, PDFs | 3 | Planned |
-| `sales_enablement/` | Prospect SEO audits, RFP drafting | 4 | Planned |
+**Status vocabulary:** *Active* = ran in the most recent operating cycle. *Idle* = built and proven, but no run in weeks. *Blocked* = code complete, never run, waiting on an external dependency. *Not started* = empty folder.
+
+| Folder | Domain | Phase | Modules | Status (as of 2026-07-27) |
+|---|---|---|---|---|
+| `keyword_intelligence/` | Keyword rank tracking (DataForSEO + GSC dual-lens) + trend discovery | 1–2 | 4 | **Active** — last run 2026-07-27 |
+| `competitive_intelligence/` | Competitor monitoring, backlink profiling, gap analysis | 2 | 5 | **Active** — last run 2026-07-15 |
+| `content_operations/` | Content briefs, compliance checks, glossary gaps | 2 | 4 | Idle — last run 2026-05-28; 2 of 4 modules never run |
+| `technical_seo/` | Site audits, Core Web Vitals, internal linking, sitemap/robots validation | 1 | 4 | Idle — last run 2026-05-12 |
+| `offpage_links/` | Backlink tracking, platform discovery, outreach drafting | 1–3 | 5 | **Blocked** — 0 of 5 modules ever run |
+| `content_assets/` | Whitepapers, slide decks, video scripts, infographics, PDFs | 3 | 0 | Not started |
+| `sales_enablement/` | Prospect SEO audits, RFP drafting | 4 | 0 | Not started |
 
 Each agent folder has its own `CLAUDE.md` and `workflow.md`. Use them as the authoritative reference when operating inside that folder.
+
+### Known gaps behind the status column
+
+Code existing is not the same as code running. Before assuming an agent produces current data, check `agent_runs`:
+
+```sql
+SELECT agent_name, count(*) AS runs, max(run_date) AS last_run
+FROM agent_runs GROUP BY agent_name ORDER BY last_run DESC;
+```
+
+- **`offpage_links/` is blocked on the DataForSEO Backlinks subscription.** All five modules are written; none has ever logged a run. `backlink_tracker` and `backlink_analyzer` cannot fetch, which starves `platform_finder` → `outreach_drafter` → `guest_post_drafter` downstream. One subscription unblocks the largest idle section of the system.
+- **`content_operations.compliance_checker` and `.concentration_checker` have never run.** Untested against production data — treat their first run as a trial, not a routine job.
+- **LLM-dependent steps degrade rather than fail** while the Anthropic API credit balance is exhausted. Six modules import `common/llm.py`: `keyword_intelligence.trend_scout` (classification step — completes with rule-based labels only), `competitive_intelligence.event_digest` and `.gap_analyzer` (both in an *Active* agent, so their narrative output is silently thinner right now), `content_operations.brief_generator`, `offpage_links.outreach_drafter`, and `.guest_post_drafter`.
+
+This table is easy to let rot. When an agent's first module ships or its last run date moves a cycle, update the row in the same commit.
 
 ## Routing — which agent owns what
 
@@ -43,7 +60,21 @@ If the user's intent spans multiple agents, call out the primary owner and menti
 
 ## System-level principles (always apply)
 
-1. **Connector abstraction is sacred.** Agents never call DataForSEO / GSC / PageSpeed / Anthropic directly. Use `common/connectors/*`. If a connector doesn't yet expose what an agent needs, add a method to the connector — don't bypass it.
+1. **No agent knows whose site it is.** Client identity — brand name, owned domains, service lines, market, vocabularies, tuned thresholds — lives in the `tenant*` tables (migration 012) and reaches agents through `common/tenant.py`. **Never hardcode a domain, an offering name, a company name, or a client-tuned threshold in agent code.** If you need something the profile doesn't expose, add it to the profile.
+
+   ```python
+   from common.tenant import profile, system_preamble
+   p = profile()                    # cached; never call at import time
+   if p.owns(domain): ...
+   for o in p.offerings: ...
+   p.policy("cwv_thresholds")["mobile"]
+   ```
+
+   **Brand identity goes in `system=`, never in a user prompt.** `system_preamble()` is the only sanctioned place a client's name enters a model call. A brand name interpolated into a user prompt cannot be fixed by configuration — it just produces confidently wrong output for the next client.
+
+   Two things deliberately stay in code: English-language logic (stopwords, definition-intent regexes) because that is a property of the language and not the client, and the `damco_*` event-type strings in `competitor_serp_events`, which are a data contract with 84,985 existing rows.
+
+2. **Connector abstraction is sacred.** Agents never call DataForSEO / GSC / PageSpeed / Anthropic directly. Use `common/connectors/*`. If a connector doesn't yet expose what an agent needs, add a method to the connector — don't bypass it.
 
 2. **Shared database, no point-to-point integrations.** Agents communicate through tables in `sql/`, not through direct imports of each other's modules. Cross-agent events go through the `triggers` table in Phase 4.
 

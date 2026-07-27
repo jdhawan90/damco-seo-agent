@@ -62,14 +62,10 @@ from urllib.parse import urlencode, urlparse
 
 import requests
 
-from common.connectors.crawler import DEFAULT_USER_AGENT, Crawler
+from common.connectors.crawler import Crawler, default_user_agent
 
 
 logger = logging.getLogger(__name__)
-
-# Reddit rejects generic/absent User-Agents with a 429. A descriptive one
-# with contact info is what their API guidelines ask for.
-FEED_USER_AGENT = DEFAULT_USER_AGENT
 
 DEFAULT_TIMEOUT_SEC = 25
 DEFAULT_MAX_ITEMS = 60
@@ -153,7 +149,10 @@ def _crawler_for(rate_limit_sec: float) -> Crawler:
     crawler = _crawlers.get(rate_limit_sec)
     if crawler is None:
         crawler = Crawler(
-            user_agent=FEED_USER_AGENT,
+            # Reddit rejects generic/absent User-Agents with a 429. The tenant
+            # bot string carries contact info, which is what their API
+            # guidelines ask for.
+            user_agent=default_user_agent(),
             timeout_sec=DEFAULT_TIMEOUT_SEC,
             rate_limit_sec=rate_limit_sec,
             # Feeds are XML/JSON, not HTML pages — robots.txt Disallow rules

@@ -577,6 +577,26 @@ class DataForSEOAccessDenied(DataForSEOError):
     """
 
 
+def _rank_to_100(raw_rank) -> int | None:
+    """
+    Normalize DataForSEO's backlink `rank` (0-1000) to a 0-100 authority scale.
+
+    The two tables that store this disagreed about the scale: `backlinks.
+    domain_authority` is an unconstrained INTEGER and was receiving the raw
+    0-1000 value, while `competitor_backlinks.domain_rank` carries a
+    CHECK (BETWEEN 0 AND 100) that the same raw value would violate on the
+    first real insert. Normalizing here — at the one boundary both writers
+    pass through — keeps the scale honest for every consumer instead of
+    asking each of them to remember.
+    """
+    if raw_rank is None:
+        return None
+    try:
+        return max(0, min(100, round(float(raw_rank) / 10.0)))
+    except (TypeError, ValueError):
+        return None
+
+
 def get_backlinks(target: str, limit: int = 1000, mode: str = "as_is") -> list[dict]:
     """
     Fetch backlinks pointing to a target URL or domain.
@@ -622,7 +642,8 @@ def get_backlinks(target: str, limit: int = 1000, mode: str = "as_is") -> list[d
                     "target_url": item.get("url_to"),
                     "anchor": item.get("anchor"),
                     "dofollow": item.get("dofollow"),
-                    "rank": item.get("rank"),             # DataForSEO authority score
+                    "rank": item.get("rank"),             # raw DataForSEO authority, 0-1000
+                    "domain_rank": _rank_to_100(item.get("rank")),
                     "first_seen": item.get("first_seen"),
                     "last_seen": item.get("last_seen"),
                     "raw": item,

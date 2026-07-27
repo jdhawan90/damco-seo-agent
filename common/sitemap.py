@@ -3,7 +3,7 @@ Sitemap fetching + parsing — shared utility for any agent that needs to
 walk an XML sitemap.
 
 Used by:
-  - technical_seo.sitemap_validator (audits Damco's own properties)
+  - technical_seo.sitemap_validator (audits the tenant's own properties)
   - competitive_intelligence.content_monitor (tracks competitor publishing)
 
 Pure functions — no database access. Each call is self-contained.
@@ -22,15 +22,28 @@ logger = logging.getLogger(__name__)
 
 NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
 
-USER_AGENT = "DamcoSEOBot/1.0 (+https://www.damcogroup.com/; SEO ops monitoring)"
+# Unbranded fallback only — the tenant's own identity is resolved per request
+# by user_agent(). These functions also fetch *competitors'* sitemaps, so the
+# string here is what other operators see in their logs.
+USER_AGENT = "SEOBot/1.0 (SEO ops monitoring)"
 REQUEST_TIMEOUT = 15
 RATE_LIMIT_SLEEP = 0.5   # seconds between sitemap requests per-walk
+
+
+def user_agent() -> str:
+    """Tenant crawler identity, falling back to USER_AGENT."""
+    from common.tenant import crawler_user_agent   # local: keeps import DB-free
+    return crawler_user_agent(USER_AGENT)
+
+
+def _headers() -> dict[str, str]:
+    return {"User-Agent": user_agent()}
 
 
 def fetch_xml(url: str, timeout: int = REQUEST_TIMEOUT) -> str | None:
     """Fetch one sitemap URL. Returns text, or None on transport/HTTP failure."""
     try:
-        r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=timeout)
+        r = requests.get(url, headers=_headers(), timeout=timeout)
         r.raise_for_status()
         return r.text
     except requests.RequestException as exc:
@@ -163,7 +176,7 @@ def discover_sitemap_urls(domain: str) -> list[str]:
     for base in (f"https://www.{domain}", f"https://{domain}"):
         try:
             r = requests.get(f"{base}/robots.txt",
-                             headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT)
+                             headers=_headers(), timeout=REQUEST_TIMEOUT)
             if r.ok:
                 for line in r.text.splitlines():
                     line = line.strip()
@@ -179,7 +192,7 @@ def discover_sitemap_urls(domain: str) -> list[str]:
     for candidate in candidates:
         try:
             r = requests.head(candidate,
-                              headers={"User-Agent": USER_AGENT},
+                              headers=_headers(),
                               timeout=REQUEST_TIMEOUT, allow_redirects=True)
             if r.status_code == 200 and not any(c.lower() == candidate.lower() for c in found):
                 found.append(r.url)  # use final URL after redirects
@@ -190,6 +203,6 @@ def discover_sitemap_urls(domain: str) -> list[str]:
 
 __all__ = [
     "fetch_xml", "parse_sitemap", "collect_urls_from_sitemap",
-    "discover_sitemap_urls",
+    "discover_sitemap_urls", "user_agent",
     "USER_AGENT", "REQUEST_TIMEOUT", "RATE_LIMIT_SLEEP", "NS",
 ]
