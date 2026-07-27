@@ -26,7 +26,8 @@ already actionable; the narrative report surfaces these as
 
 Usage
 -----
-    # Default: all 3 domains, default page_types, weekly cadence
+    # Default: all configured domains, default page_types. Every run
+    # re-crawls the full scope — there is no cadence filter in this module.
     python -m technical_seo.internal_link_analyzer
 
     # One domain
@@ -34,10 +35,6 @@ Usage
 
     # Larger scope — include blog/resource as graph nodes too
     python -m technical_seo.internal_link_analyzer --page-types home,pillar,service,blog,resource
-
-    # Force re-crawl ignoring cadence (also clears internal_links rows older
-    # than this run's date_crawled for the scope)
-    python -m technical_seo.internal_link_analyzer --all
 
     # Analyze the existing graph without re-crawling (useful for iteration
     # on detection/scoring after a previous build)
@@ -64,15 +61,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.connectors.crawler import Crawler, CrawlResult
 from common.database import connection, fetch_all, record_agent_run
+from common.tenant import profile
 
 
 logger = logging.getLogger("internal_link_analyzer")
 
 AGENT_NAME = "technical_seo.internal_link_analyzer"
 
-DEFAULT_PAGE_TYPES = ("home", "pillar", "service")
-LARGE_SCOPE_PAGE_TYPES = ("home", "pillar", "service", "blog", "resource")
-DEFAULT_CADENCE_DAYS = 14   # links don't change as fast as content; check fortnightly
+# Page types worth flagging findings on ("priority types") — the same audit
+# scope the other technical_seo modules use.
+def default_page_types() -> tuple[str, ...]:
+    return tuple(profile().policy("audit_page_types", ()))
+
+
+def large_scope_page_types() -> tuple[str, ...]:
+    """Default scope plus the long-tail content that links into it."""
+    return default_page_types() + ("blog", "resource")
+
+
 DEFAULT_WORKERS = 4
 
 # PageRank settings
@@ -80,11 +86,9 @@ PR_DAMPING = 0.85
 PR_MAX_ITERATIONS = 50
 PR_TOLERANCE = 1e-6
 
-# Inbound-link thresholds by page_type. Pages below are flagged.
-INBOUND_THRESHOLDS = {
-    "pillar":  5,
-    "service": 3,
-}
+def inbound_thresholds() -> dict[str, int]:
+    """Inbound-link floors by page_type, from tenant policy. Below → flagged."""
+    return profile().policy("inbound_link_thresholds", {})
 
 SEVERITY = {
     "orphan_page":         "medium",
@@ -310,7 +314,7 @@ def find_underlinked(edges: list[tuple[str, str]],
     out: list[dict] = []
     for p in pages:
         pt = p["page_type"]
-        threshold = INBOUND_THRESHOLDS.get(pt)
+        threshold = thresholds.get(pt)
         if threshold is None:
             continue
         normalized = normalize_url(p["url"])
@@ -419,7 +423,8 @@ def write_findings(*, pages: list[dict], edges: list[tuple[str, str]],
     # Map normalized → original URL so issues are recorded with the canonical
     # spelling from pages.url (consistent with other agents' output).
     norm_to_url = {normalize_url(p["url"]): p["url"] for p in pages}
-    priority_types = {p["page_type"] for p in pages if p["page_type"] in ("home", "pillar", "service")}
+    priority = default_page_types()
+    priority_types = {p["page_type"] for p in pages if p["page_type"] in priority}
     page_by_url = {normalize_url(p["url"]): p for p in pages}
     urls_analyzed = {p["url"] for p in pages}
     current_open: set[tuple[str, str]] = set()
@@ -522,7 +527,8 @@ def write_report(*, run_date: date, domain: str | None,
         lines.append("_None._")
     else:
         page_by_norm = {normalize_url(p["url"]): p for p in pages}
-        priority_orphans = [u for u in orphans if page_by_norm.get(u) and page_by_norm[u]["page_type"] in ("home", "pillar", "service")]
+        priority = default_page_types()
+        priority_orphans = [u for u in orphans if page_by_norm.get(u) and page_by_norm[u]["page_type"] in priority]
         lines.append(f"### Priority-type orphans ({len(priority_orphans)})")
         for u in priority_orphans[:30]:
             pt = page_by_norm[u]["page_type"]
@@ -573,11 +579,12 @@ def write_report(*, run_date: date, domain: str | None,
 # ---------------------------------------------------------------------------
 
 def run(domain: str | None = None,
-        page_types: tuple[str, ...] = DEFAULT_PAGE_TYPES,
+        page_types: tuple[str, ...] | None = None,
         workers: int = DEFAULT_WORKERS,
         skip_crawl: bool = False,
         dry_run: bool = False) -> dict:
     start = time.monotonic()
+    page_types = page_types or default_page_types()
     run_date = date.today()
 
     pages = load_pages(domain, page_types)
@@ -675,7 +682,8 @@ def run(domain: str | None = None,
         print(f"  Fetched OK:            {crawl_stats['fetched_ok']}")
         print(f"  Fetch errors:          {crawl_stats['fetch_errors']}")
         print(f"  Edges inserted:        {inserted_edges}")
-    print(f"  Orphan pages:          {len(orphans)}  (of which priority: {sum(1 for u in orphans if next((p['page_type'] for p in pages if normalize_url(p['url']) == u), None) in ('home', 'pillar', 'service'))})")
+    priority = default_page_types()
+    print(f"  Orphan pages:          {len(orphans)}  (of which priority: {sum(1 for u in orphans if next((p['page_type'] for p in pages if normalize_url(p['url']) == u), None) in priority)})")
     print(f"  Dead-end pages:        {len(dead_ends)}")
     print(f"  Under-linked pillars:  {sum(1 for u in underlinked if u['page_type'] == 'pillar')}")
     print(f"  Under-linked services: {sum(1 for u in underlinked if u['page_type'] == 'service')}")
@@ -712,10 +720,12 @@ def run(domain: str | None = None,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco Internal Link Analyzer")
+    default_types = default_page_types()
+    parser = argparse.ArgumentParser(
+        description=f"{profile().brand_name} Internal Link Analyzer")
     parser.add_argument("--domain", help="Restrict to one domain")
-    parser.add_argument("--page-types", default=",".join(DEFAULT_PAGE_TYPES),
-                        help=f"Comma-separated page types (default: {','.join(DEFAULT_PAGE_TYPES)})")
+    parser.add_argument("--page-types", default=",".join(default_types),
+                        help=f"Comma-separated page types (default: {','.join(default_types)})")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
                         help=f"Parallel workers (default: {DEFAULT_WORKERS})")
     parser.add_argument("--skip-crawl", action="store_true",

@@ -12,8 +12,8 @@ Why glossary pages?
 Definition-intent searches ("what is X", "X meaning", "X definition")
 are AEO/GEO gold. AI search engines (Google AI Overviews, Perplexity,
 ChatGPT web search) overwhelmingly cite simple, well-structured
-definitions. Damco's existing pages are largely service/marketing pages
-that don't satisfy this intent — leaving a sizable visibility gap.
+definitions. Most existing pages are service/marketing pages that don't
+satisfy this intent — leaving a sizable visibility gap.
 
 Detection patterns
 ------------------
@@ -71,6 +71,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.database import fetch_all, record_agent_run
+from common.tenant import profile
 
 
 logger = logging.getLogger("glossary_detector")
@@ -128,25 +129,40 @@ def load_keywords(offering: str | None) -> list[dict]:
     return fetch_all(sql, params)
 
 
+def glossary_path() -> str:
+    """
+    URL path segment where this tenant's glossary entries live.
+
+    Normalized to leading and trailing slashes so both the SQL LIKE and the
+    slug regex below can rely on the shape. A client publishing under /terms/
+    or /wiki/ would otherwise match nothing here — every covered term would
+    be reported as a gap.
+    """
+    path = (profile().policy("glossary_url_path") or "/glossary/").strip().lower()
+    return "/" + path.strip("/") + "/"
+
+
 def load_glossary_terms() -> set[str]:
     """
     Return the lowercased set of terms already covered by an existing
     glossary page. We extract the term from the URL path
-    (everything after "/glossary/") plus any title we already audited.
+    (everything after the glossary path) plus any title we already audited.
     """
+    gpath = glossary_path()
     rows = fetch_all(
         """
         SELECT url, title FROM pages
          WHERE page_type = 'glossary'
             OR url ILIKE %s
         """,
-        ["%/glossary/%"],
+        [f"%{gpath}%"],
     )
     covered: set[str] = set()
+    slug_re = re.compile(re.escape(gpath) + r"([^/?#]+)")
     for r in rows:
         url = (r.get("url") or "").lower()
-        # /glossary/{term-slug}
-        m = re.search(r"/glossary/([^/?#]+)", url)
+        # <glossary_path>{term-slug}
+        m = slug_re.search(url)
         if m:
             term_slug = m.group(1).replace("-", " ").replace("_", " ").strip()
             if term_slug:
@@ -466,7 +482,7 @@ def run(offering: str | None = None,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco Glossary Gap Detector")
+    parser = argparse.ArgumentParser(description="Glossary Gap Detector")
     parser.add_argument("--offering", help="Restrict to one offering (default: all)")
     parser.add_argument("--min-impressions", type=int, default=DEFAULT_MIN_IMPRESSIONS,
                         help=f"Only show candidates with at least N GSC impressions "

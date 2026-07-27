@@ -3,10 +3,10 @@ Gap Analyzer — first module of the Competitive Intelligence agent
 ==================================================================
 
 For each tracked offering, surfaces where competitors rank in our SERPs
-and Damco doesn't. Three gap types:
+and we don't. Three gap types:
 
-  coverage_gap  — Damco not in top 100; >= 1 tracked competitor in top 10
-  displacement  — Damco at #11-30; competitor in top 10 (we have a page,
+  coverage_gap  — we're not in top 100; >= 1 tracked competitor in top 10
+  displacement  — we're at #11-30; competitor in top 10 (we have a page,
                   just need to outrank specific competitors)
   cluster_win   — Same competitor wins top-10 placements for >= 3 keywords
                   in the offering (they own a sub-niche)
@@ -52,13 +52,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.database import fetch_all, record_agent_run
 from common.llm import call_claude, LLMUnavailableError
+from common.tenant import profile, system_preamble
 
 
 logger = logging.getLogger("gap_analyzer")
 AGENT_NAME = "competitive_intelligence.gap_analyzer"
 
 # Detection thresholds
-DISPLACEMENT_RANGE = (11, 30)   # Damco rank in this band = "displacement" gap
+DISPLACEMENT_RANGE = (11, 30)   # our rank in this band = "displacement" gap
 CLUSTER_MIN_KEYWORDS = 3        # competitor must win ≥3 kw in offering to be a cluster
 
 # Severity scoring weights (1-10 scale).
@@ -68,6 +69,19 @@ SEV_BONUS_PER_TOP10_COMP = 0.4   # each tracked competitor in top 10 adds
 SEV_GSC_IMPR_BONUS      = 2      # ≥100 impressions in 14d
 SEV_GSC_CLICKS_BONUS    = 3      # any clicks in 14d (real traffic at stake)
 SEV_PRIMARY_THREAT_BONUS = 1     # primary-threat competitor in top 10
+
+# SERP-shape penalty. `page_type` was already being selected and carried into
+# every gap record, and then never used in any score — so a keyword whose
+# entire top 10 is listicles and directories scored exactly the same as one
+# owned by service pages. It is not the same: you cannot rank a service page
+# against ten "top 20 vendors" round-ups, and telling someone to try is
+# confidently wrong advice.
+#
+# Down-weight rather than exclude — these keywords are still worth a
+# different asset (a comparison page, a calculator), just not the obvious one.
+UNWINNABLE_PAGE_TYPES = frozenset({"listicle", "docs"})
+SEV_LISTICLE_SERP_PENALTY = 2    # majority of top 10 is round-ups/directories
+UNWINNABLE_SERP_RATIO = 0.6      # share of top 10 that must be unwinnable
 
 OUTPUTS_REPORTS = Path(__file__).resolve().parent.parent / "outputs" / "reports"
 OUTPUTS_AUDITS  = Path(__file__).resolve().parent.parent / "outputs" / "audits"
@@ -88,10 +102,14 @@ def load_offerings() -> list[str]:
 def load_offering_data(offering: str) -> dict:
     """
     Pulls everything needed for gap analysis on one offering:
-      - keywords + their latest Damco position (DataForSEO) + GSC stats
+      - keywords + our own latest position (DataForSEO) + GSC stats
       - top-10 competitors per keyword (latest snapshot)
+
+    The `damco_*` SQL aliases and dict keys below are internal names only —
+    they never reach a report. Renaming them would mean renaming the
+    matching columns in keyword_serp_snapshots, which needs a migration.
     """
-    # Damco + GSC view, one row per keyword
+    # Own-position + GSC view, one row per keyword
     damco_rows = fetch_all(
         """
         WITH latest_serp AS (
@@ -160,10 +178,10 @@ def load_offering_data(offering: str) -> dict:
 def classify(damco_pos: int | None, competitors: list[dict]) -> tuple[str, int]:
     """
     Returns (gap_type, base_severity) for one keyword.
-        - 'none'         — Damco in top 10
-        - 'coverage_gap' — Damco missing from top 100
-        - 'displacement' — Damco 11-30
-        - 'low_priority' — Damco 31+ (lower-prio displacement)
+        - 'none'         — we're in top 10
+        - 'coverage_gap' — we're missing from top 100
+        - 'displacement' — we're at 11-30
+        - 'low_priority' — we're at 31+ (lower-prio displacement)
     """
     if damco_pos is not None and 1 <= damco_pos <= 10:
         return "none", 0
@@ -193,7 +211,16 @@ def compute_severity(base: int, kw_row: dict, competitors: list[dict]) -> float:
     if any(c.get("threat_tier") == "primary" for c in competitors):
         score += SEV_PRIMARY_THREAT_BONUS
 
-    return round(score, 1)
+    # SERP shape. If most of the top 10 is round-ups and documentation, a
+    # service page is not going to displace them however much traffic the
+    # keyword carries.
+    typed = [c.get("page_type") for c in competitors if c.get("page_type")]
+    if typed:
+        unwinnable = sum(1 for t in typed if t in UNWINNABLE_PAGE_TYPES)
+        if unwinnable / len(typed) >= UNWINNABLE_SERP_RATIO:
+            score -= SEV_LISTICLE_SERP_PENALTY
+
+    return round(max(0.0, score), 1)
 
 
 def detect_cluster_wins(data: dict) -> list[dict]:
@@ -264,6 +291,7 @@ def build_gap_records(data: dict) -> list[dict]:
 def make_narrative_prompt(offering: str, gaps: list[dict],
                           clusters: list[dict], totals: dict) -> str:
     """Prompt template for the per-offering executive summary + recs."""
+    brand = profile().brand_name
     top_coverage   = [g for g in gaps if g["gap_type"] == "coverage_gap"]
     top_coverage.sort(key=lambda g: -g["severity"])
     top_displaced  = [g for g in gaps if g["gap_type"] == "displacement"]
@@ -271,23 +299,23 @@ def make_narrative_prompt(offering: str, gaps: list[dict],
 
     def fmt_gap(g):
         comps = ", ".join(f"{c['domain']} (#{c['pos']})" for c in g["top_competitors"][:3])
-        return (f"  - {g['keyword']!r}: damco pos={g['damco_position']}, "
+        return (f"  - {g['keyword']!r}: our pos={g['damco_position']}, "
                 f"gsc_clicks={g['gsc_clicks']}, gsc_impr={g['gsc_impressions']}, "
                 f"top competitors: {comps}")
 
     lines = [
         f"Offering: {offering}",
         f"Total active keywords in offering: {totals['total']}",
-        f"Damco in top 10:      {totals['in_top10']}",
+        f"{brand} in top 10:      {totals['in_top10']}",
         f"Coverage gaps:        {totals['coverage_gap']}",
         f"Displacement gaps:    {totals['displacement']}",
         f"Low-priority (rank >30): {totals['low_priority']}",
         "",
-        f"Top 15 COVERAGE GAPS (Damco not in top 100, competitors in top 10):",
+        f"Top 15 COVERAGE GAPS ({brand} not in top 100, competitors in top 10):",
     ]
     lines.extend(fmt_gap(g) for g in top_coverage[:15])
     lines.append("")
-    lines.append(f"Top 10 DISPLACEMENT gaps (Damco close, competitor in top 10):")
+    lines.append(f"Top 10 DISPLACEMENT gaps ({brand} close, competitor in top 10):")
     lines.extend(fmt_gap(g) for g in top_displaced[:10])
     lines.append("")
     lines.append(f"CLUSTER WINS (competitors dominating this offering):")
@@ -300,9 +328,9 @@ def make_narrative_prompt(offering: str, gaps: list[dict],
 
     body = "\n".join(lines)
 
-    return f"""You are an SEO strategist briefing Damco's marketing team. Below is competitive gap data for one offering. Generate:
+    return f"""Below is competitive gap data for one offering. Generate:
 
-1. A 2-3 paragraph executive summary of the competitive landscape and where Damco stands.
+1. A 2-3 paragraph executive summary of the competitive landscape and where we stand.
 2. Top 5 prioritized recommendations as a numbered list. For each: state the action, name the specific keywords/URLs/competitors involved, and label it as either "QUICK WIN" (achievable in 2-4 weeks via on-page work) or "INVESTMENT" (requires new content/pages, 1-3 months).
 3. A one-line "headline takeaway" suitable for a stakeholder email.
 
@@ -319,7 +347,11 @@ def get_narrative(offering: str, gaps: list[dict], clusters: list[dict],
     """Returns (narrative_text, usage) or (None, None) when LLM unavailable."""
     prompt = make_narrative_prompt(offering, gaps, clusters, totals)
     try:
-        text, usage = call_claude(prompt, tier="default", max_tokens=2500)
+        text, usage = call_claude(
+            prompt, tier="default", max_tokens=2500,
+            system=system_preamble(
+                "You are an SEO strategist briefing the marketing team."),
+        )
         return text, usage
     except LLMUnavailableError as exc:
         logger.warning("LLM narrative unavailable for %s: %s", offering, exc)
@@ -329,6 +361,7 @@ def get_narrative(offering: str, gaps: list[dict], clusters: list[dict],
 def rule_based_narrative(offering: str, gaps: list[dict],
                          clusters: list[dict], totals: dict) -> str:
     """Plain rule-based fallback when LLM isn't available."""
+    brand = profile().brand_name
     coverage = sorted([g for g in gaps if g["gap_type"] == "coverage_gap"],
                       key=lambda g: -g["severity"])[:10]
     displace = sorted([g for g in gaps if g["gap_type"] == "displacement"],
@@ -338,9 +371,9 @@ def rule_based_narrative(offering: str, gaps: list[dict],
         f"## Executive summary (rule-based — load Anthropic credit for narrative)",
         "",
         f"- **{totals['total']}** active keywords in `{offering}`.",
-        f"- **{totals['in_top10']}** ({totals['in_top10']*100//max(1,totals['total'])}%) on page 1 — Damco's defended territory.",
-        f"- **{totals['coverage_gap']}** coverage gaps (competitor in top 10, Damco missing entirely).",
-        f"- **{totals['displacement']}** displacement gaps (Damco at #11-30, competitor on page 1).",
+        f"- **{totals['in_top10']}** ({totals['in_top10']*100//max(1,totals['total'])}%) on page 1 — {brand}'s defended territory.",
+        f"- **{totals['coverage_gap']}** coverage gaps (competitor in top 10, {brand} missing entirely).",
+        f"- **{totals['displacement']}** displacement gaps ({brand} at #11-30, competitor on page 1).",
         f"- **{len(clusters)}** competitor cluster(s) dominating ≥{CLUSTER_MIN_KEYWORDS} keywords each.",
         "",
         "## Top quick-win candidates (displacement, by severity)",
@@ -350,7 +383,7 @@ def rule_based_narrative(offering: str, gaps: list[dict],
         lines.append("_None._")
     for g in displace:
         comps = ", ".join(f"{c['domain']} (#{c['pos']})" for c in g["top_competitors"][:3])
-        lines.append(f"- `{g['keyword']}` — Damco #{g['damco_position']}, "
+        lines.append(f"- `{g['keyword']}` — {brand} #{g['damco_position']}, "
                      f"{g['gsc_clicks']} clicks / {g['gsc_impressions']} impr. Top: {comps}")
 
     lines.extend(["", "## Top content-investment candidates (coverage gap, by severity)", ""])
@@ -372,6 +405,7 @@ def rule_based_narrative(offering: str, gaps: list[dict],
 def write_markdown(offering: str, gaps: list[dict], clusters: list[dict],
                    totals: dict, narrative: str | None,
                    narrative_usage: dict | None) -> Path:
+    brand = profile().brand_name
     OUTPUTS_AUDITS.mkdir(parents=True, exist_ok=True)
     safe_offering = offering.replace(" ", "_").replace("/", "-").replace(",", "")
     path = OUTPUTS_AUDITS / f"gap_analysis_{safe_offering}_{date.today().isoformat()}.md"
@@ -408,10 +442,10 @@ def write_markdown(offering: str, gaps: list[dict], clusters: list[dict],
     parts.append(f"| Type | Count |")
     parts.append(f"|---|---:|")
     parts.append(f"| Active keywords | {totals['total']} |")
-    parts.append(f"| Damco in top 10 (no gap) | {totals['in_top10']} |")
-    parts.append(f"| Coverage gap (Damco not in top 100) | {totals['coverage_gap']} |")
-    parts.append(f"| Displacement (Damco #11-30) | {totals['displacement']} |")
-    parts.append(f"| Low priority (Damco rank > 30) | {totals['low_priority']} |")
+    parts.append(f"| {brand} in top 10 (no gap) | {totals['in_top10']} |")
+    parts.append(f"| Coverage gap ({brand} not in top 100) | {totals['coverage_gap']} |")
+    parts.append(f"| Displacement ({brand} #11-30) | {totals['displacement']} |")
+    parts.append(f"| Low priority ({brand} rank > 30) | {totals['low_priority']} |")
     parts.append("")
 
     if clusters:
@@ -432,7 +466,7 @@ def write_markdown(offering: str, gaps: list[dict], clusters: list[dict],
     if coverage:
         parts.append(f"## All coverage gaps ({len(coverage)})")
         parts.append("")
-        parts.append("Damco doesn't rank in the top 100 but at least one tracked competitor sits in the top 10.")
+        parts.append(f"{brand} doesn't rank in the top 100 but at least one tracked competitor sits in the top 10.")
         parts.append("")
         parts.append("| Severity | Keyword | GSC clicks | GSC impr | Top competitors |")
         parts.append("|---:|---|---:|---:|---|")
@@ -448,9 +482,9 @@ def write_markdown(offering: str, gaps: list[dict], clusters: list[dict],
     if displaced:
         parts.append(f"## All displacement gaps ({len(displaced)})")
         parts.append("")
-        parts.append("Damco ranks #11-30 — page exists, optimization push could land top 10.")
+        parts.append(f"{brand} ranks #11-30 — page exists, optimization push could land top 10.")
         parts.append("")
-        parts.append("| Severity | Keyword | Damco pos | Damco URL | GSC clicks | Top competitors |")
+        parts.append(f"| Severity | Keyword | {brand} pos | {brand} URL | GSC clicks | Top competitors |")
         parts.append("|---:|---|---:|---|---:|---|")
         for g in displaced[:50]:
             comps = ", ".join(f"`{c['domain']}` (#{c['pos']})" for c in g["top_competitors"])
@@ -469,6 +503,7 @@ def write_excel(all_offering_data: list[tuple[str, list[dict], list[dict], dict]
     import openpyxl
     from openpyxl.styles import Font, Alignment, PatternFill
 
+    brand = profile().brand_name
     OUTPUTS_REPORTS.mkdir(parents=True, exist_ok=True)
     path = OUTPUTS_REPORTS / f"gap_analysis_{date.today().isoformat()}.xlsx"
 
@@ -478,7 +513,7 @@ def write_excel(all_offering_data: list[tuple[str, list[dict], list[dict], dict]
     ws.title = "Per-Keyword"
     headers = [
         "Offering", "Keyword", "Gap Type", "Severity",
-        "Damco Position", "Damco URL", "Target URL",
+        f"{brand} Position", f"{brand} URL", "Target URL",
         "GSC Position", "GSC Clicks (14d)", "GSC Impressions (14d)",
         "Top-10 Competitor Count",
         "Comp #1 Pos", "Comp #1 Domain",
@@ -700,7 +735,7 @@ def run(offering: str | None = None, with_narrative: bool = False,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco Competitive Gap Analyzer")
+    parser = argparse.ArgumentParser(description="Competitive Gap Analyzer")
     parser.add_argument("--offering", help="Restrict to one offering (default: all)")
     parser.add_argument("--with-narrative", action="store_true",
                         help="Generate LLM-narrated executive summary + recommendations. "

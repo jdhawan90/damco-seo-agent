@@ -2,10 +2,10 @@
 Backlink Tracker — Phase 1 module of Off-Page & Links
 ======================================================
 
-Monthly (or on-demand) refresh of Damco's backlink inventory from two
+Monthly (or on-demand) refresh of our backlink inventory from two
 sources:
   - DataForSEO Backlinks API     (authoritative, paid subscription)
-  - Google Search Console        (Google's own view of Damco's backlinks)
+  - Google Search Console        (Google's own view of those backlinks)
 
 Both feed into the shared `backlinks` table. The UNIQUE constraint
 (source_url, page_id, data_source) keeps each (link → page) pair from a
@@ -54,7 +54,7 @@ Usage
     python -m offpage_links.backlink_tracker --page-id 42
 
     # Domain-level pull
-    python -m offpage_links.backlink_tracker --domain damcogroup.com
+    python -m offpage_links.backlink_tracker --domain example.com
 
     # Skip Anthropic-credit-free GSC pass (DataForSEO only)
     python -m offpage_links.backlink_tracker --skip-gsc
@@ -141,12 +141,12 @@ def pull_dataforseo(target: str, limit: int) -> tuple[list[dict] | None, str | N
 def pull_gsc_pages_seen(days: int = 30) -> set[str]:
     """
     GSC's public API doesn't expose external link sources, but it DOES
-    expose which Damco pages received clicks/impressions from external
+    expose which of our pages received clicks/impressions from external
     queries. If a DataForSEO-discovered backlink points to a page that
     GSC also reports activity for in the last N days, we treat that
     as cross-source confirmation.
 
-    Returns: the set of Damco page URLs that appear in GSC over the
+    Returns: the set of our page URLs that appear in GSC over the
     last `days`.
     """
     try:
@@ -192,7 +192,12 @@ def normalize_domain(url: str | None) -> str:
 def upsert_backlinks(page_id: int, rows: list[dict], data_source: str) -> int:
     """
     Idempotent insert. Returns the number of NEW rows inserted (not
-    updates). DataForSEO returns "rank" as 0-1000 — store as int.
+    updates).
+
+    `domain_authority` is stored on a 0-100 scale. The connector normalizes
+    DataForSEO's raw 0-1000 `rank` into `domain_rank`; storing the raw value
+    here used to saturate every downstream consumer that clamps to 100
+    (vendor_scorer being the visible one).
     """
     if not rows:
         return 0
@@ -221,7 +226,7 @@ def upsert_backlinks(page_id: int, rows: list[dict], data_source: str) -> int:
                         page_id,
                         source_url,
                         r.get("source_domain") or normalize_domain(source_url),
-                        int(r["rank"]) if r.get("rank") is not None else None,
+                        r.get("domain_rank"),
                         classify_link_type(r.get("dofollow"), r.get("raw") or {}),
                         (r.get("anchor") or "")[:500] or None,
                         data_source,
@@ -345,7 +350,13 @@ def run(page_id: int | None = None,
     # `pages` table has a row for the home URL, since `backlinks.page_id`
     # is a FK.
     if domain:
-        host = domain.lstrip("https://").lstrip("http://").rstrip("/")
+        # removeprefix, not lstrip: lstrip strips a *character set*, so
+        # `--domain shopify.com` was silently becoming `opify.com`. It went
+        # unnoticed because every domain tried so far starts with 'd'.
+        host = domain.strip()
+        for scheme in ("https://", "http://"):
+            host = host.removeprefix(scheme)
+        host = host.rstrip("/")
         home_candidates = [f"https://{host}/", f"https://www.{host}/", f"http://{host}/"]
         for cand in home_candidates:
             row = fetch_one("SELECT id, url, page_type FROM pages WHERE url = %s", [cand])
@@ -436,7 +447,8 @@ def run(page_id: int | None = None,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco Backlink Tracker (DataForSEO + GSC)")
+    parser = argparse.ArgumentParser(
+        description=f"{profile().brand_name} Backlink Tracker (DataForSEO + GSC)")
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--page-id", type=int, help="Restrict to a single pages.id")
     target.add_argument("--url", help="Restrict to a single page URL")

@@ -11,9 +11,10 @@ Standard agent lifecycle:
             below-threshold scores and 20%+ regressions; log `agent_runs`
   Notify  — console summary
 
-Thresholds (per session 2026-05-05 plan):
-  Mobile  performance score < 60  → cwv_below_threshold (severity high)
-  Desktop performance score < 85  → cwv_below_threshold (severity high)
+Thresholds:
+  Per-device performance-score pass marks come from the tenant policy
+  `cwv_thresholds`. A score below the mark opens cwv_below_threshold
+  (severity high).
 
 Regression detection:
   Any of {lcp_ms, inp_ms, cls_score, performance_score} drops by ≥20%
@@ -22,8 +23,8 @@ Regression detection:
 
 Usage
 -----
-    # Default: all 3 domains, page_type IN (home, pillar, service),
-    # weekly cadence, both mobile + desktop, 4 parallel workers.
+    # Default: the tenant's audit page types, weekly cadence,
+    # both mobile + desktop, 4 parallel workers.
     python -m technical_seo.cwv_monitor
 
     # Restrict to one domain
@@ -61,22 +62,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.database import connection, fetch_all, record_agent_run
 from common.connectors.pagespeed import get_cwv_metrics, PageSpeedError
+from common.tenant import profile
 
 
 logger = logging.getLogger("cwv_monitor")
 
 AGENT_NAME = "technical_seo.cwv_monitor"
 
-# Performance score thresholds (session 2026-05-05 plan).
-THRESHOLDS = {
-    "mobile":  60,
-    "desktop": 85,
-}
+
+def thresholds() -> dict[str, int]:
+    """Per-device performance-score pass marks, from tenant policy."""
+    return profile().policy("cwv_thresholds", {})
+
+
+def default_page_types() -> tuple[str, ...]:
+    return tuple(profile().policy("audit_page_types", ()))
+
 
 # Regression: 20% drop in any tracked metric vs previous snapshot.
 REGRESSION_PCT = 0.20
 
-DEFAULT_PAGE_TYPES = ("home", "pillar", "service")
 DEFAULT_CADENCE_DAYS = 7
 DEFAULT_WORKERS = 4
 DEFAULT_STRATEGIES = ("mobile", "desktop")
@@ -354,7 +359,7 @@ def write_run_results(results: list[dict], previous: dict[tuple[str, str], dict]
                 continue
             score = r.get("performance_score")
             device = r["strategy"]
-            if score is not None and score < THRESHOLDS[device]:
+            if score is not None and score < thresholds()[device]:
                 counters["below_threshold_open"] += 1
             regs = compute_regressions(previous.get((r["url"], device)), r)
             if regs:
@@ -390,12 +395,12 @@ def write_run_results(results: list[dict], previous: dict[tuple[str, str], dict]
                 continue
 
             # 2. Below-threshold check
-            if perf is not None and perf < THRESHOLDS[device]:
+            if perf is not None and perf < thresholds()[device]:
                 if open_issue(
                     cur, url=url, issue_type="cwv_below_threshold",
                     severity=ISSUE_SEVERITY["cwv_below_threshold"],
                     device=device,
-                    details={"score": perf, "threshold": THRESHOLDS[device], "source": r.get("source")},
+                    details={"score": perf, "threshold": thresholds()[device], "source": r.get("source")},
                 ):
                     counters["below_threshold_open"] += 1
                 current_open.add((url, "cwv_below_threshold", device))
@@ -448,17 +453,18 @@ def print_summary(work_items: list[tuple[str, str]], counters: dict,
     print()
 
     # Surface low-scoring pages so the user sees the most actionable items
+    marks = thresholds()
     low = [
         r for r in results
         if r.get("performance_score") is not None
-        and r["performance_score"] < THRESHOLDS[r["strategy"]]
+        and r["performance_score"] < marks[r["strategy"]]
     ]
     if low:
         low.sort(key=lambda r: r["performance_score"] or 0)
         print(f"  Lowest-scoring pages (top {min(10, len(low))}):")
         for r in low[:10]:
             print(f"    {r['strategy']:<8}  score {r['performance_score']:>3}  "
-                  f"(thr {THRESHOLDS[r['strategy']]})  {r['url']}")
+                  f"(thr {marks[r['strategy']]})  {r['url']}")
         print()
 
 
@@ -467,7 +473,7 @@ def print_summary(work_items: list[tuple[str, str]], counters: dict,
 # ---------------------------------------------------------------------------
 
 def run(domain: str | None = None,
-        page_types: tuple[str, ...] = DEFAULT_PAGE_TYPES,
+        page_types: tuple[str, ...] | None = None,
         strategies: tuple[str, ...] = DEFAULT_STRATEGIES,
         cadence_days: int = DEFAULT_CADENCE_DAYS,
         workers: int = DEFAULT_WORKERS,
@@ -475,6 +481,7 @@ def run(domain: str | None = None,
         dry_run: bool = False) -> dict:
     start = time.monotonic()
     run_date = date.today()
+    page_types = page_types or default_page_types()
 
     urls = load_pages(domain, page_types)
     if not urls:
@@ -536,10 +543,12 @@ def run(domain: str | None = None,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco CWV Monitor")
+    default_types = default_page_types()
+    parser = argparse.ArgumentParser(
+        description=f"{profile().brand_name} CWV Monitor")
     parser.add_argument("--domain", help="Restrict to one domain")
-    parser.add_argument("--page-types", default=",".join(DEFAULT_PAGE_TYPES),
-                        help=f"Comma-separated page types (default: {','.join(DEFAULT_PAGE_TYPES)})")
+    parser.add_argument("--page-types", default=",".join(default_types),
+                        help=f"Comma-separated page types (default: {','.join(default_types)})")
     parser.add_argument("--strategies", default=",".join(DEFAULT_STRATEGIES),
                         help="Comma-separated strategies (mobile,desktop). Default: both")
     parser.add_argument("--cadence", type=int, default=DEFAULT_CADENCE_DAYS,

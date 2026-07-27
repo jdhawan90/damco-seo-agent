@@ -3,21 +3,21 @@ Platform Finder — Phase 2 module of Off-Page & Links
 =====================================================
 
 Discovers outreach targets by mining competitor backlinks. The pitch
-is simple: every domain that links to ≥2 of Damco's tracked competitors
-but doesn't yet link to Damco is a high-confidence outreach prospect.
+is simple: every domain that links to ≥2 of our tracked competitors
+but doesn't yet link to us is a high-confidence outreach prospect.
 
 This module reads `competitor_backlinks` (populated by
 competitive_intelligence.backlink_analyzer when the DataForSEO
-Backlinks subscription is active) plus `backlinks` (Damco's own
+Backlinks subscription is active) plus `backlinks` (our own
 inventory) and computes the gap.
 
 Quality gates
 -------------
 - DA < 20 → drop (spam/PBN risk)
-- Domain blacklist (typical scraper aggregator domains, hardcoded list)
-- Damco's own domains → drop
+- Domain blacklist (typical scraper aggregator domains, from the tenant profile)
+- Our own domains → drop
 - Already in `platform_targets` with `status='blacklist'` or `status='exhausted'` → drop
-- Niche relevance score (rule-based token overlap with Damco's offerings)
+- Niche relevance score (rule-based token overlap with the tenant's offerings)
 
 Scoring
 -------
@@ -25,7 +25,7 @@ For each candidate platform we compute:
   base_score          = number of distinct competitors linking from it
   da_bonus            = max(0, (avg_DA - 30) / 5)
   niche_relevance     = lexical overlap between the platform's domain
-                        / tld / known niche label and Damco's offering tokens
+                        / tld / known niche label and the tenant's offering tokens
   recency_bonus       = +1 if linked in the last 90 days
   total_score         = base * 10 + da_bonus + niche_relevance * 5 + recency_bonus * 3
 
@@ -74,6 +74,7 @@ from urllib.parse import urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.database import connection, fetch_all, fetch_one, record_agent_run
+from common.tenant import profile
 
 
 logger = logging.getLogger("platform_finder")
@@ -85,40 +86,13 @@ DEFAULT_MIN_DA = 20
 DEFAULT_TOP_N = 50
 DEFAULT_MIN_COMPETITORS = 2
 
-# Damco's own and sister-brand domains — never recommended as outreach targets
-DAMCO_DOMAINS = {
-    "damcogroup.com", "damcodigital.com", "achieva.ai",
-}
+# platform_targets.quality_score is NUMERIC(5,2) → 999.99 is the ceiling.
+MAX_QUALITY_SCORE = 999.99
 
-# Aggregators / spam-prone domains that are technically real but not editorial
-# outreach targets. Add aggressively when you see junk in the report.
-DOMAIN_BLACKLIST = {
-    "g2.com", "capterra.com", "trustpilot.com", "sitejabber.com",
-    "facebook.com", "twitter.com", "x.com", "linkedin.com",
-    "instagram.com", "pinterest.com", "youtube.com", "reddit.com",
-    "quora.com", "medium.com", "wordpress.com", "blogspot.com",
-    "github.com", "stackoverflow.com",
-    # Aggregator-style "best of" listing factories — low conversion outreach
-    "designrush.com", "goodfirms.co", "topdevelopers.co",
-}
-
-# Niche tokens by Damco offering → drives niche_relevance scoring
-OFFERING_TOKENS: dict[str, set[str]] = {
-    "AI":                              {"ai", "artificial", "intelligence", "ml", "agent", "agentic", "llm"},
-    "Insurance":                       {"insurance", "insurtech", "underwriting", "claims", "policy"},
-    "BPM":                             {"bpm", "process", "workflow", "automation"},
-    "Business Process Automation":     {"automation", "bpa", "rpa", "workflow"},
-    "Microsoft":                       {"microsoft", "azure", "dynamics", "power"},
-    "AS400":                           {"as400", "iseries", "ibm", "rpg", "legacy"},
-    "OutSystems":                      {"outsystems", "lowcode", "low-code"},
-    "Web3":                            {"web3", "blockchain", "crypto", "defi", "nft"},
-    "Achieva":                         {"salesforce", "crm", "sfdc"},
-    "Cloud Consulting & Migration":    {"cloud", "azure", "aws", "gcp", "migration"},
-    "Data and Visualization":          {"data", "tableau", "powerbi", "analytics", "viz"},
-    "App Services & Integrations":     {"integration", "api", "esb", "middleware"},
-    "Staffing":                        {"staffing", "talent", "recruitment", "team"},
-    "Tech Strategy":                   {"strategy", "advisory", "transformation"},
-}
+# Owned domains, the aggregator/spam blocklist and the per-offering niche
+# tokens all come from the tenant profile now — see `common.tenant`. The
+# blocklist lives in `tenant_vocabularies` under kind='domain_blacklist'; add
+# aggressively there when you see junk in the report.
 
 
 # ---------------------------------------------------------------------------
@@ -133,30 +107,45 @@ def detect_competitor_backlinks_table() -> bool:
 
 def load_competitor_backlinks(offering: str | None) -> list[dict]:
     """
-    Pull competitor backlinks. Joins to `competitors` to filter by offering /
-    threat tier. Schema (from migration 008) is expected to have at minimum:
-      competitor_id, source_url, source_domain, domain_authority, anchor,
-      first_seen, last_seen, dofollow
+    Pull competitor backlinks, joined to `competitors`.
+
+    Column names here must match migration 008 exactly: `domain_rank`,
+    `anchor_text`, `is_dofollow`. They previously read `domain_authority`,
+    `anchor` and `dofollow`, none of which exist.
+
+    Offering is not a column on `competitors` — migration 004 dropped it.
+    A competitor's offerings are derived from the keywords it actually ranks
+    for, aggregated once in the CTE rather than per backlink row.
     """
     params: list = []
     sql = """
-        SELECT cb.source_url, cb.source_domain, cb.domain_authority,
-               cb.anchor, cb.first_seen, cb.last_seen, cb.dofollow,
-               c.competitor_domain, c.threat_tier, c.category, c.offering
+        WITH competitor_offerings AS (
+            SELECT cr.competitor_id,
+                   array_agg(DISTINCT k.offering) AS offerings
+              FROM competitor_rankings cr
+              JOIN keywords k ON k.id = cr.keyword_id
+             WHERE k.offering IS NOT NULL
+             GROUP BY cr.competitor_id
+        )
+        SELECT cb.source_url, cb.source_domain, cb.domain_rank,
+               cb.anchor_text, cb.first_seen, cb.last_seen, cb.is_dofollow,
+               c.competitor_domain, c.threat_tier, c.category,
+               COALESCE(co.offerings, ARRAY[]::text[]) AS offerings
           FROM competitor_backlinks cb
           JOIN competitors c ON c.id = cb.competitor_id
+          LEFT JOIN competitor_offerings co ON co.competitor_id = c.id
          WHERE cb.source_domain IS NOT NULL
     """
     if offering:
-        sql += " AND c.offering = %s"
+        sql += " AND %s = ANY(co.offerings)"
         params.append(offering)
     return fetch_all(sql, params)
 
 
-def load_damco_linking_domains() -> set[str]:
-    """Domains already linking to Damco — exclude from prospects."""
+def load_existing_linking_domains() -> set[str]:
+    """Domains already linking to us — exclude from prospects."""
     rows = fetch_all("SELECT DISTINCT source_domain FROM backlinks WHERE source_domain IS NOT NULL")
-    return {(r["source_domain"] or "").lower().lstrip("www.") for r in rows}
+    return {_strip_www((r["source_domain"] or "").lower()) for r in rows}
 
 
 def load_platform_blocklist() -> set[str]:
@@ -167,13 +156,23 @@ def load_platform_blocklist() -> set[str]:
     return {_root_domain(r["platform_url"]) for r in rows}
 
 
+def _strip_www(host: str) -> str:
+    """
+    Drop a leading 'www.' — with removeprefix, not lstrip.
+
+    `"wordpress.com".lstrip("www.")` returns 'ordpress.com', because lstrip
+    takes a character set. That silently defeated the domain-blacklist entry
+    for wordpress.com and mangled anything else starting with w or a dot.
+    """
+    return host.removeprefix("www.")
+
+
 def _root_domain(url: str) -> str:
     if not url:
         return ""
     if "://" not in url:
         url = "https://" + url
-    host = urlparse(url).netloc.lower()
-    return host[4:] if host.startswith("www.") else host
+    return _strip_www(urlparse(url).netloc.lower())
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +180,7 @@ def _root_domain(url: str) -> str:
 # ---------------------------------------------------------------------------
 
 def niche_relevance(domain: str, offering_tokens_set: set[str]) -> float:
-    """0..3 score for how well the domain's tokens match Damco offerings."""
+    """0..3 score for how well the domain's tokens match our offerings."""
     if not offering_tokens_set:
         return 0.0
     tokens = set(re.findall(r"[a-z0-9]+", domain.lower()))
@@ -200,10 +199,17 @@ def days_since(d) -> int | None:
 
 def score_candidate(competitors: set[str], avg_da: float, latest_link_age_days: int | None,
                      niche_score: float) -> float:
+    """
+    Unbounded above by construction — a popular aggregator linking to 100
+    competitors scores >1000. `platform_targets.quality_score` is
+    NUMERIC(5,2), so anything over 999.99 raises `numeric field overflow`
+    on the upsert. Clamp here rather than at the write, so the report and
+    the stored value always agree.
+    """
     base = len(competitors) * 10
     da_bonus = max(0.0, (avg_da - 30) / 5.0)
     recency_bonus = 3.0 if (latest_link_age_days is not None and latest_link_age_days <= 90) else 0.0
-    return round(base + da_bonus + niche_score * 5 + recency_bonus, 2)
+    return min(MAX_QUALITY_SCORE, round(base + da_bonus + niche_score * 5 + recency_bonus, 2))
 
 
 # ---------------------------------------------------------------------------
@@ -211,30 +217,33 @@ def score_candidate(competitors: set[str], avg_da: float, latest_link_age_days: 
 # ---------------------------------------------------------------------------
 
 def aggregate_candidates(rows: list[dict],
-                          damco_domains_linking: set[str],
+                          existing_linking_domains: set[str],
                           platform_blocklist: set[str],
                           min_competitors: int,
                           min_da: int,
-                          offerings_in_scope: list[str]) -> list[dict]:
+                          offerings_in_scope: list[str] | None) -> list[dict]:
     """
     Group competitor backlinks by source_domain → candidate platform.
     Apply quality gates. Score remaining. Returns sorted candidates.
+
+    `offerings_in_scope=None` means "every offering" — the profile unions the
+    niche tokens for us.
     """
-    offering_tokens_set: set[str] = set()
-    for o in offerings_in_scope:
-        offering_tokens_set |= OFFERING_TOKENS.get(o, set())
+    p = profile()
+    offering_tokens_set = set(p.niche_tokens_for(offerings_in_scope))
+    domain_blacklist = p.vocab("domain_blacklist")
 
     by_domain: dict[str, dict] = {}
 
     for r in rows:
-        domain = (r.get("source_domain") or "").lower().lstrip("www.")
+        domain = _strip_www((r.get("source_domain") or "").lower())
         if not domain:
             continue
 
         # Quality gates
-        if domain in DAMCO_DOMAINS or domain in damco_domains_linking:
+        if p.owns(domain) or domain in existing_linking_domains:
             continue
-        if domain in DOMAIN_BLACKLIST or domain in platform_blocklist:
+        if domain in domain_blacklist or domain in platform_blocklist:
             continue
 
         bucket = by_domain.setdefault(domain, {
@@ -250,16 +259,16 @@ def aggregate_candidates(rows: list[dict],
             "example_source_urls":  [],
         })
         bucket["competitors"].add(r["competitor_domain"])
-        if r.get("offering"):
-            bucket["competitor_offerings"].add(r["offering"])
-        if r.get("domain_authority") is not None:
-            bucket["da_scores"].append(int(r["domain_authority"]))
-        if r.get("anchor"):
-            bucket["anchors"].append(r["anchor"])
+        for off in (r.get("offerings") or []):
+            bucket["competitor_offerings"].add(off)
+        if r.get("domain_rank") is not None:
+            bucket["da_scores"].append(int(r["domain_rank"]))
+        if r.get("anchor_text"):
+            bucket["anchors"].append(r["anchor_text"])
         bucket["total_links"] += 1
-        if r.get("dofollow") is True:
+        if r.get("is_dofollow") is True:
             bucket["dofollow_count"] += 1
-        elif r.get("dofollow") is False:
+        elif r.get("is_dofollow") is False:
             bucket["nofollow_count"] += 1
         seen = r.get("last_seen") or r.get("first_seen")
         if seen and (bucket["latest_seen"] is None or seen > bucket["latest_seen"]):
@@ -444,15 +453,26 @@ def run(offering: str | None = None,
                 "md_path": str(md_path)}
 
     rows = load_competitor_backlinks(offering)
-    damco_linkers = load_damco_linking_domains()
+    existing_linkers = load_existing_linking_domains()
     blocklist = load_platform_blocklist()
-    offerings_scope = [offering] if offering else list(OFFERING_TOKENS.keys())
+    offerings_scope = [offering] if offering else None
 
-    logger.info("Loaded %d competitor-backlink rows; %d damco-linkers; %d blacklisted",
-                len(rows), len(damco_linkers), len(blocklist))
+    # `--offering` is free text matched against keywords.offering in SQL, so it
+    # can name something the tenant profile has no offering row for. That
+    # contributes no niche tokens, scoring every candidate at niche=0 and
+    # leaving competitor count and DA to decide the ranking — say so.
+    if offering and profile().offering(offering) is None:
+        logger.warning(
+            "%r is not one of the tenant's offerings — niche_relevance will be "
+            "0.0 for every candidate. Known offerings: %s",
+            offering, ", ".join(profile().offering_names),
+        )
+
+    logger.info("Loaded %d competitor-backlink rows; %d existing linker(s); %d blacklisted",
+                len(rows), len(existing_linkers), len(blocklist))
 
     candidates = aggregate_candidates(
-        rows, damco_linkers, blocklist,
+        rows, existing_linkers, blocklist,
         min_competitors=min_competitors, min_da=min_da,
         offerings_in_scope=offerings_scope,
     )
@@ -515,8 +535,9 @@ def run(offering: str | None = None,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco Outreach Platform Finder")
-    parser.add_argument("--offering", help="Restrict to one Damco offering")
+    brand = profile().brand_name
+    parser = argparse.ArgumentParser(description=f"{brand} Outreach Platform Finder")
+    parser.add_argument("--offering", help=f"Restrict to one {brand} offering")
     parser.add_argument("--min-da", type=int, default=DEFAULT_MIN_DA,
                         help=f"Minimum average DA per candidate (default: {DEFAULT_MIN_DA})")
     parser.add_argument("--min-competitors", type=int, default=DEFAULT_MIN_COMPETITORS,

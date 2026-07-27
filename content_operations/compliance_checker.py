@@ -43,10 +43,10 @@ Usage
     python -m content_operations.compliance_checker --brief-id 42
 
     # Score a specific URL against a brief (e.g. staging vs production)
-    python -m content_operations.compliance_checker --brief-id 42 --url https://staging.damcogroup.com/data-enrichment-services
+    python -m content_operations.compliance_checker --brief-id 42 --url https://staging.example.com/some-service-page
 
     # Score a URL without a brief — runs generic SEO checks only
-    python -m content_operations.compliance_checker --url https://www.damcogroup.com/some-page
+    python -m content_operations.compliance_checker --url https://www.example.com/some-page
 
     # Dry run — write report but skip DB insert
     python -m content_operations.compliance_checker --brief-id 42 --dry-run
@@ -577,7 +577,7 @@ def check_aeo_signals(crawl: CrawlResult, visible_text: str) -> Issue:
       - At least one heading phrased as a question (H1/H2)
       - Bulleted/numbered list present
       - FAQ section heuristic (H2 containing "FAQ" or "Frequently Asked")
-      - At least 2 external citations (links to non-Damco domains)
+      - At least 2 external citations (links to domains we don't own)
     """
     headings = (crawl.h1_tags or []) + (crawl.h2_tags or [])
     question_headings = sum(1 for h in headings if "?" in h)
@@ -907,7 +907,7 @@ def run(brief_id: int | None = None,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco SEO Content Compliance Checker")
+    parser = argparse.ArgumentParser(description="SEO Content Compliance Checker")
     parser.add_argument("--brief-id", type=int,
                         help="content_briefs.id — load brief + use its target_url unless --url overrides")
     parser.add_argument("--url",

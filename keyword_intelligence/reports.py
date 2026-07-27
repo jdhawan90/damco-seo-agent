@@ -21,8 +21,10 @@ Usage
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
+from collections import Counter, defaultdict
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -34,6 +36,7 @@ from openpyxl.utils import get_column_letter
 
 from common.config import settings
 from common.database import fetch_all
+from common.tenant import profile
 
 
 logger = logging.getLogger("reports")
@@ -173,7 +176,8 @@ def build_summary_sheet(wb: Workbook, data: dict) -> None:
     by_keyword = data["by_keyword"]
 
     # Title
-    ws.cell(row=1, column=1, value="Damco Keyword Rank Tracker — Summary")
+    ws.cell(row=1, column=1,
+            value=f"{profile().brand_name} Keyword Rank Tracker — Summary")
     ws.cell(row=1, column=1).font = Font(name="Arial", bold=True, size=14)
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=2 + len(dates))
 
@@ -534,11 +538,186 @@ def build_gsc_sheet(wb: Workbook, data: dict) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def compute_narrative_facts(data: dict) -> dict:
+    """
+    Everything the narrative is allowed to talk about, computed here.
+
+    The model never sees a raw ranking row and never does arithmetic. It gets
+    finished aggregates and turns them into prose. That boundary is the whole
+    design: these are the numbers executives reconcile against last month's
+    workbook, so a model must not be in the path that produces them.
+    """
+    dates = data["dates"]
+    by_keyword = data["by_keyword"]
+    latest = dates[-1] if dates else None
+    prev = dates[-2] if len(dates) >= 2 else None
+
+    buckets: Counter = Counter()
+    striking: list[tuple[str, str | None, int]] = []
+    per_offering: dict[str, list[int]] = defaultdict(list)
+    gsc_gaps: list[tuple[str, int, float]] = []
+
+    for kw, kd in by_keyword.items():
+        row = kd["rankings"].get(latest, {}) if latest else {}
+        pos = row.get("position")
+        buckets[row.get("bucket") or "not-found"] += 1
+        if pos is not None:
+            per_offering[kd["offering"] or "(unassigned)"].append(pos)
+            if 11 <= pos <= 20:
+                striking.append((kw, kd["offering"], pos))
+
+        # GSC is a separate series keyed by its own dates — it is not a field
+        # on the ranking row, and it rarely lands on the same date as a SERP
+        # snapshot. Take the most recent GSC observation available.
+        gsc_series = kd.get("gsc") or {}
+        gsc_pos = None
+        if gsc_series:
+            gsc_pos = gsc_series[max(gsc_series)].get("position")
+        if pos is not None and gsc_pos is not None and abs(round(gsc_pos) - pos) >= 5:
+            gsc_gaps.append((kw, pos, float(gsc_pos)))
+
+    improved: list[tuple[str, str | None, int]] = []
+    declined: list[tuple[str, str | None, int]] = []
+    if prev and latest:
+        for kw, kd in by_keyword.items():
+            p = kd["rankings"].get(prev, {}).get("position")
+            c = kd["rankings"].get(latest, {}).get("position")
+            if p is None or c is None:
+                continue
+            delta = p - c
+            if delta > 0:
+                improved.append((kw, kd["offering"], delta))
+            elif delta < 0:
+                declined.append((kw, kd["offering"], -delta))
+    improved.sort(key=lambda x: -x[2])
+    declined.sort(key=lambda x: -x[2])
+
+    offering_avg = {
+        o: round(sum(v) / len(v), 1) for o, v in per_offering.items() if v
+    }
+
+    return {
+        "latest": latest,
+        "previous": prev,
+        "total_keywords": len(by_keyword),
+        "buckets": dict(buckets),
+        "improved_count": len(improved),
+        "declined_count": len(declined),
+        "top_improved": improved[:10],
+        "top_declined": declined[:10],
+        "striking_count": len(striking),
+        "top_striking": sorted(striking, key=lambda x: x[2])[:10],
+        "offering_avg_position": dict(sorted(offering_avg.items(), key=lambda x: x[1])),
+        "gsc_gap_count": len(gsc_gaps),
+        "top_gsc_gaps": sorted(gsc_gaps, key=lambda x: -abs(round(x[2]) - x[1]))[:5],
+    }
+
+
+def _rule_based_narrative(f: dict, offering: str | None) -> str:
+    """
+    Deterministic fallback. Not a placeholder — this is what ships whenever
+    the model is unavailable, so it has to stand on its own.
+    """
+    lines = [
+        f"Snapshot for {f['latest']}"
+        + (f", offering '{offering}'" if offering else "")
+        + f". {f['total_keywords']} keywords tracked.",
+        "",
+    ]
+    top10 = f["buckets"].get("1-5", 0) + f["buckets"].get("5-10", 0)
+    lines.append(f"{top10} keywords sit in the top 10; "
+                 f"{f['buckets'].get('not-found', 0)} are not ranking at all.")
+    if f["previous"]:
+        lines.append(f"Against {f['previous']}: {f['improved_count']} improved, "
+                     f"{f['declined_count']} declined.")
+        if f["top_improved"]:
+            kw, off, d = f["top_improved"][0]
+            lines.append(f"Biggest gain: '{kw}' up {d} positions.")
+        if f["top_declined"]:
+            kw, off, d = f["top_declined"][0]
+            lines.append(f"Biggest loss: '{kw}' down {d} positions.")
+    if f["striking_count"]:
+        lines.append(f"{f['striking_count']} keywords sit at positions 11-20 — "
+                     f"the cheapest wins available.")
+    if f["gsc_gap_count"]:
+        lines.append(f"{f['gsc_gap_count']} keywords differ by 5+ positions between "
+                     f"the SERP snapshot and Search Console's average, which usually "
+                     f"means personalisation or location variance rather than an error.")
+    return "\n".join(lines)
+
+
+def build_narrative_sheet(wb: Workbook, data: dict, offering: str | None) -> None:
+    """
+    Sheet 2: the interpretation the other five sheets don't provide.
+
+    Five sheets of numbers and not one sentence saying what happened. This
+    reads the aggregates from `compute_narrative_facts` and explains them.
+    Degrades to the rule-based summary when the model is unavailable.
+    """
+    ws = wb.create_sheet("Executive Summary", 1)
+    facts = compute_narrative_facts(data)
+
+    prompt = (
+        "Write a short executive summary of this SEO ranking snapshot for a "
+        "marketing leader who will not read the underlying spreadsheet.\n\n"
+        "Rules:\n"
+        "- 4 to 7 sentences, plain prose, no bullet points, no headings.\n"
+        "- Use ONLY the figures given below. Do not compute new ones, do not "
+        "estimate, and do not mention anything not present here.\n"
+        "- Lead with what actually changed, not with totals.\n"
+        "- If the picture is flat, say so plainly rather than manufacturing drama.\n"
+        "- Name the single action you would take next.\n\n"
+        f"FIGURES:\n{json.dumps(facts, indent=2, default=str)}\n"
+    )
+
+    text = _rule_based_narrative(facts, offering)
+    source = "rule-based"
+    try:
+        from common.llm import call_claude, LLMUnavailableError
+        from common.tenant import system_preamble
+        generated, usage = call_claude(
+            prompt,
+            tier="default",
+            system=system_preamble(
+                "You are an SEO analyst writing for a marketing leader."),
+            max_tokens=700,
+            temperature=0.4,
+        )
+        if generated.strip():
+            text = generated.strip()
+            source = f"Claude ({usage['model']})"
+    except Exception as exc:                     # LLMUnavailableError and friends
+        logger.info("Narrative unavailable, using rule-based summary: %s", exc)
+
+    ws.cell(row=1, column=1, value="Executive Summary").font = Font(bold=True, size=14)
+    ws.cell(row=2, column=1, value=f"{facts['latest']} · {facts['total_keywords']} keywords"
+                                   + (f" · {offering}" if offering else ""))
+    ws.cell(row=2, column=1).font = Font(italic=True, color="666666")
+
+    row = 4
+    for para in text.split("\n"):
+        c = ws.cell(row=row, column=1, value=para)
+        c.alignment = Alignment(wrap_text=True, vertical="top")
+        row += 1
+
+    row += 1
+    ws.cell(row=row, column=1, value=f"Source: {source}").font = Font(
+        italic=True, size=9, color="888888")
+    row += 1
+    ws.cell(row=row, column=1,
+            value="Figures are computed in Python and passed to the summariser as "
+                  "finished aggregates; the model does no arithmetic.").font = Font(
+        italic=True, size=9, color="888888")
+
+    ws.column_dimensions["A"].width = 110
+
+
 def generate_report(
     start_date: date | None = None,
     end_date: date | None = None,
     offering: str | None = None,
     output_path: str | None = None,
+    narrative: bool = True,
 ) -> Path:
     """Generate an Excel ranking report and return the file path."""
     data = load_ranking_data(start_date, end_date, offering)
@@ -550,6 +729,8 @@ def generate_report(
 
     wb = Workbook()
     build_summary_sheet(wb, data)
+    if narrative:
+        build_narrative_sheet(wb, data, offering)
     build_detailed_sheet(wb, data)
     build_movement_sheet(wb, data)
     build_striking_distance_sheet(wb, data)
@@ -568,7 +749,7 @@ def generate_report(
 
     wb.save(str(path))
     print(f"\n  Report saved to: {path}")
-    print(f"  Sheets: Summary, Detailed Rankings, Movement, Striking Distance, GSC Performance")
+    print(f"  Sheets: {', '.join(wb.sheetnames)}")
     print(f"  Keywords: {len(data['keywords'])}")
     print(f"  Date range: {data['dates'][0]} to {data['dates'][-1]}")
     print()
@@ -582,6 +763,8 @@ def main() -> None:
     parser.add_argument("--end", help="End date (YYYY-MM-DD)")
     parser.add_argument("--offering", help="Filter by offering")
     parser.add_argument("--output", "-o", help="Output file path")
+    parser.add_argument("--no-narrative", action="store_true",
+                        help="Skip the Executive Summary sheet (no LLM call)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(name)s  %(message)s")
@@ -589,7 +772,8 @@ def main() -> None:
     start = date.fromisoformat(args.start) if args.start else None
     end = date.fromisoformat(args.end) if args.end else None
 
-    generate_report(start_date=start, end_date=end, offering=args.offering, output_path=args.output)
+    generate_report(start_date=start, end_date=end, offering=args.offering,
+                    output_path=args.output, narrative=not args.no_narrative)
 
 
 if __name__ == "__main__":

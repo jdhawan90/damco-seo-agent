@@ -12,7 +12,7 @@ Standard agent lifecycle:
 
 Usage
 -----
-    # Validate all 3 domains (default)
+    # Validate every domain in the tenant profile (default)
     python -m technical_seo.sitemap_validator
 
     # Restrict to one domain
@@ -47,17 +47,12 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.database import connection, record_agent_run
+from common.tenant import profile, strip_www
 
 
 logger = logging.getLogger("sitemap_validator")
 
 AGENT_NAME = "technical_seo.sitemap_validator"
-
-DOMAINS = [
-    {"domain": "damcogroup.com",   "sitemap_url": "https://www.damcogroup.com/sitemap.xml"},
-    {"domain": "damcodigital.com", "sitemap_url": "https://damcodigital.com/sitemap_index.xml"},
-    {"domain": "achieva.ai",       "sitemap_url": "https://achieva.ai/sitemap.xml"},
-]
 
 # Sitemap parsing + walking lives in common/sitemap.py so the
 # competitive_intelligence.content_monitor can reuse it without crossing
@@ -67,7 +62,8 @@ from common.sitemap import (
     fetch_xml,
     parse_sitemap,
     collect_urls_from_sitemap,
-    USER_AGENT,
+    discover_sitemap_urls,
+    user_agent,
     REQUEST_TIMEOUT,
 )
 
@@ -103,7 +99,7 @@ def validate_url(url: str) -> dict:
             'error':          error message or None,
         }
     """
-    headers = {"User-Agent": USER_AGENT}
+    headers = {"User-Agent": user_agent()}
     try:
         # Try HEAD first
         r = requests.head(
@@ -136,43 +132,9 @@ def validate_url(url: str) -> dict:
 # Page-type heuristic
 # ---------------------------------------------------------------------------
 
-# Path keywords for the 'service' bucket — broad on purpose. The check is
-# substring in the lowercased path, so 'services' covers /ai-services,
-# /ai-development-services, /services/etc.
-SERVICE_KEYWORDS = (
-    "services", "solutions", "consulting", "development", "automation",
-    "agent", "integration", "platform", "marketing",
-    "migration", "modernization", "maintenance", "support", "engineering",
-    "implementation", "transformation",
-)
-
-# Industry/vertical paths — usually service pages segmented by vertical
-# (e.g. /industry/healthcare-digital-marketing, /industries/insurance/)
-INDUSTRY_PATHS = ("/industry/", "/industries/", "/verticals/")
-
-BLOG_PATHS = (
-    "/blog/", "/blogs/",  # WordPress + Damco's /blogs/ plural
-    "/blog-",
-    "/insights/", "/insight/", "/articles/", "/article/",
-    "/news/", "/posts/", "/post-",
-    "/service_insights/", "/type_insights/",  # achieva.ai custom post types
-)
-
-RESOURCE_PATHS = (
-    "/case-studies/", "/case-study/", "/client-success/", "/success-story/", "/success-stories/",
-    "/whitepapers/", "/whitepaper/", "/ebooks/", "/ebook/", "/downloads/",
-    "/resources/", "/webinars/", "/webinar/", "/reports/", "/report/",
-    "/services_success/", "/industries_success/",  # achieva.ai custom post types
-)
-
-# WordPress taxonomy / archive paths — auto-generated index pages that
-# don't represent unique content. Categorize as NULL so they don't get
-# audited by default.
-WP_ARCHIVE_PATHS = ("/category/", "/tag/", "/author/", "/taxonomy/")
-
-
 def categorize_page_type(url: str) -> str | None:
     """Best-effort URL → page_type. Returns None when ambiguous (human review)."""
+    p = profile()
     path = (urlparse(url).path or "").lower().rstrip("/")
 
     # Home
@@ -183,30 +145,95 @@ def categorize_page_type(url: str) -> str | None:
     # matches the same patterns as /blogs/<slug>.
     path_match = path + "/"
 
-    # WordPress taxonomy/archive pages — auto-generated, no unique content.
-    # Return NULL so they don't get audited as service/blog content.
-    if any(seg in path_match for seg in WP_ARCHIVE_PATHS):
-        return None
+    # Path map, longest segment first, so /industries_success/ (resource) wins
+    # over /industries/ (service). A NULL label means the segment is recognised
+    # but deliberately out of scope — the WordPress taxonomy archives, which are
+    # auto-generated index pages with no unique content. Those return None here
+    # rather than falling through to the service-keyword check below.
+    for segment, page_type in p.vocab_labeled("url_path_map"):
+        if segment in path_match:
+            return page_type
 
-    # Glossary
-    if "/glossary/" in path_match:
-        return "glossary"
-    # Blog / insights / news
-    if any(seg in path_match for seg in BLOG_PATHS):
-        return "blog"
-    # Resources / case studies / whitepapers
-    if any(seg in path_match for seg in RESOURCE_PATHS):
-        return "resource"
-    # Landing pages
-    if any(seg in path_match for seg in ("/lp/", "/landing/", "/campaigns/")):
-        return "landing"
-    # Industry / vertical pages → treated as service (verticalized offerings)
-    if any(seg in path_match for seg in INDUSTRY_PATHS):
-        return "service"
-    # Service pages — keyword anywhere in path
-    if any(kw in path for kw in SERVICE_KEYWORDS):
+    # Service pages — keyword anywhere in the path. Broad on purpose: the check
+    # is a substring of the lowercased path, so 'services' covers /ai-services,
+    # /ai-development-services and /services/etc.
+    if any(kw in path for kw in p.vocab("service_keywords")):
         return "service"
     return None
+
+
+# ---------------------------------------------------------------------------
+# LLM fallback for URLs the rules cannot place
+#
+# The rules above are a hand-rolled classifier with an escape hatch: they
+# return None and the module dumps the uncategorized URLs for a human. That
+# is the exact case the repo's "rule-based first, LLM second" principle
+# sanctions a model for — genuinely ambiguous classification.
+#
+# It is also the portability fix. A new client currently needs someone to
+# hand-edit `service_keywords` for their vocabulary; with this, the rules
+# handle what they can and the model covers the rest.
+#
+# Three constraints make the cost bounded:
+#   * only URLs that returned None reach here
+#   * one batched call per run, not one per URL
+#   * the answer is written to `pages.page_type`, so a URL is classified once
+#     and never re-sent
+# ---------------------------------------------------------------------------
+
+VALID_PAGE_TYPES = ("home", "pillar", "service", "blog", "resource",
+                    "glossary", "landing")
+MAX_LLM_CLASSIFY = 150
+
+
+def classify_unknown_urls(urls: list[str]) -> dict[str, str]:
+    """
+    Ask the model to place URLs the rules could not. Returns {url: page_type}
+    for confident answers only; anything unrecognised is dropped so it stays
+    NULL for human review rather than being guessed into the wrong bucket.
+
+    Returns {} on any failure — the caller keeps the NULLs and the run is
+    otherwise unchanged.
+    """
+    if not urls:
+        return {}
+
+    batch = urls[:MAX_LLM_CLASSIFY]
+    listing = "\n".join(f"  {u}" for u in batch)
+    prompt = (
+        "Classify each URL into exactly one page type, judging from the path.\n\n"
+        f"Types: {', '.join(VALID_PAGE_TYPES)}\n"
+        "  home      the site root\n"
+        "  pillar    a broad hub page that links to many narrower pages\n"
+        "  service   a page selling a specific service or capability\n"
+        "  blog      a dated article or post\n"
+        "  resource  a case study, whitepaper, ebook or webinar\n"
+        "  glossary  a definition of a single term\n"
+        "  landing   a campaign or paid-traffic page\n\n"
+        f"URLS:\n{listing}\n\n"
+        'Return JSON only: {"<url>": "<type>", ...}. Include a URL only if you '
+        "are confident; omit the ones you are not. Do not invent types."
+    )
+
+    from common.llm import call_claude_json
+
+    value, usage, error = call_claude_json(
+        prompt, fallback={}, tier="cheap", max_tokens=4000)
+    if error:
+        logger.info("Page-type fallback unavailable (%s) — %d URL(s) stay "
+                    "uncategorized for human review", error, len(batch))
+        return {}
+    if not isinstance(value, dict):
+        return {}
+
+    out: dict[str, str] = {}
+    for url, page_type in value.items():
+        pt = str(page_type or "").strip().lower()
+        if url in set(batch) and pt in VALID_PAGE_TYPES:
+            out[url] = pt
+    logger.info("Page-type fallback classified %d of %d unknown URL(s)",
+                len(out), len(batch))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +318,37 @@ def resolve_stale_issues(cur, *, current_open: set[tuple[str, str]],
 # Per-domain orchestration
 # ---------------------------------------------------------------------------
 
-def process_domain(entry: dict, dry_run: bool = False) -> dict:
+def load_domains(domain: str | None = None) -> list[dict]:
+    """
+    Target domains from the tenant profile, as {domain, sitemap_url}.
+
+    A profile row with no sitemap_url gets one discovered at run time (the
+    conventional locations plus robots.txt) instead of being skipped.
+    """
+    rows = profile().domain_rows
+    if domain:
+        wanted = strip_www(domain)
+        rows = [r for r in rows if strip_www(r["domain"]) == wanted]
+        if not rows:
+            known = [r["domain"] for r in profile().domain_rows]
+            raise ValueError(f"Unknown domain: {domain}. Known: {known}")
+
+    targets: list[dict] = []
+    for row in rows:
+        sitemap_url = row["sitemap_url"]
+        if not sitemap_url:
+            found = discover_sitemap_urls(row["domain"])
+            if not found:
+                logger.error("No sitemap found for %s — skipping", row["domain"])
+                continue
+            sitemap_url = found[0]
+            logger.info("Discovered sitemap for %s: %s", row["domain"], sitemap_url)
+        targets.append({"domain": row["domain"], "sitemap_url": sitemap_url})
+    return targets
+
+
+def process_domain(entry: dict, dry_run: bool = False,
+                   use_llm_fallback: bool = True) -> dict:
     """Process one domain end-to-end. Returns counters."""
     domain = entry["domain"]
     sitemap_url = entry["sitemap_url"]
@@ -331,8 +388,20 @@ def process_domain(entry: dict, dry_run: bool = False) -> dict:
                     "chain": v["redirect_chain"],
                 })
 
-        # Categorize
-        pt = categorize_page_type(url)
+    # Categorize once, up front, so the counts and the upsert below cannot
+    # disagree — categorize_page_type used to be called separately in each
+    # place, which would now mean paying for the LLM fallback twice.
+    page_types: dict[str, str | None] = {u: categorize_page_type(u) for u in page_urls}
+
+    unknown = [u for u, pt in page_types.items() if pt is None]
+    llm_classified = 0
+    if unknown and use_llm_fallback:
+        resolved = classify_unknown_urls(unknown)
+        page_types.update(resolved)
+        llm_classified = len(resolved)
+
+    for url in page_urls:
+        pt = page_types[url]
         type_counts[pt] = type_counts.get(pt, 0) + 1
         if pt is None and len(null_type_samples) < 15:
             null_type_samples.append(url)
@@ -359,8 +428,7 @@ def process_domain(entry: dict, dry_run: bool = False) -> dict:
 
             # Per-page upsert + per-page issues
             for url in page_urls:
-                pt = categorize_page_type(url)
-                upsert_page(cur, url=url, page_type=pt)
+                upsert_page(cur, url=url, page_type=page_types[url])
                 pages_upserted += 1
 
             for b in broken:
@@ -408,6 +476,7 @@ def process_domain(entry: dict, dry_run: bool = False) -> dict:
         "redirected":        len(redirected),
         "chain_too_long":    len(chain_too_long),
         "type_counts":       type_counts,
+        "llm_classified":    llm_classified,
         "null_type_samples": null_type_samples,
         "issues_opened":     issues_opened,
         "issues_resolved":   issues_resolved,
@@ -442,6 +511,9 @@ def print_summary(results: list[dict], duration: float, dry_run: bool) -> None:
         for pt, n in sorted(r["type_counts"].items(), key=lambda x: -x[1]):
             label = pt or "(uncategorized)"
             print(f"      {label:<22} {n}")
+        if r.get("llm_classified"):
+            print(f"      (of which {r['llm_classified']} placed by the "
+                  f"page-type fallback, not the rules)")
         if r["null_type_samples"]:
             print(f"    Sample uncategorized URLs (first {min(15, len(r['null_type_samples']))}):")
             for u in r["null_type_samples"]:
@@ -455,15 +527,13 @@ def print_summary(results: list[dict], duration: float, dry_run: bool) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
-def run(domain: str | None = None, dry_run: bool = False) -> dict:
+def run(domain: str | None = None, dry_run: bool = False,
+        use_llm_fallback: bool = True) -> dict:
     start = time.monotonic()
-    targets = DOMAINS
-    if domain:
-        targets = [d for d in DOMAINS if d["domain"] == domain]
-        if not targets:
-            raise ValueError(f"Unknown domain: {domain}. Known: {[d['domain'] for d in DOMAINS]}")
+    targets = load_domains(domain)
 
-    results = [process_domain(d, dry_run=dry_run) for d in targets]
+    results = [process_domain(d, dry_run=dry_run,
+                              use_llm_fallback=use_llm_fallback) for d in targets]
     duration = time.monotonic() - start
 
     if not dry_run:
@@ -488,10 +558,15 @@ def run(domain: str | None = None, dry_run: bool = False) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco Sitemap Validator")
-    parser.add_argument("--domain", help="Restrict to one domain (default: all 3)")
+    parser = argparse.ArgumentParser(
+        description=f"{profile().brand_name} Sitemap Validator")
+    parser.add_argument("--domain",
+                        help="Restrict to one domain (default: all owned domains)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Validate but don't write to DB")
+    parser.add_argument("--no-llm", action="store_true",
+                        help="Skip the page-type fallback; leave unresolvable "
+                             "URLs uncategorized for human review")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Enable debug logging")
     args = parser.parse_args()
@@ -501,7 +576,8 @@ def main() -> None:
         format="%(asctime)s  %(name)s  %(levelname)s  %(message)s",
     )
 
-    run(domain=args.domain, dry_run=args.dry_run)
+    run(domain=args.domain, dry_run=args.dry_run,
+        use_llm_fallback=not args.no_llm)
 
 
 if __name__ == "__main__":

@@ -54,6 +54,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.database import fetch_all, record_agent_run, connection
+from common.tenant import profile, strip_www
 from common.connectors.dataforseo import (
     get_backlinks, DataForSEOAccessDenied, DataForSEOError,
 )
@@ -162,7 +163,7 @@ def fetch_and_store(competitor: dict, limit: int, dry_run: bool) -> dict:
                         it.get("target_url"),
                         it.get("anchor"),
                         bool(it.get("dofollow")) if it.get("dofollow") is not None else None,
-                        it.get("rank"),
+                        it.get("domain_rank"),
                         _safe_date(it.get("first_seen")),
                         _safe_date(it.get("last_seen")),
                         json.dumps(it.get("raw") or {}),
@@ -238,10 +239,33 @@ def compute_analysis(competitor_ids: list[int]) -> dict:
         [competitor_ids],
     )
 
-    # "Intersection" = referring domains linking to ≥2 of our primary threats.
-    # These are the operational gold for outreach: they already publish about
-    # this space.
-    intersection = [r for r in top_referrers if r["competitors_linked"] >= 2]
+    # "Intersection" = referring domains linking to ≥2 of our primary threats
+    # AND not already linking to us.
+    #
+    # The second half was missing, and it is the half that makes this a
+    # prospect list rather than a list. A domain that already links to us is
+    # not an outreach target — pitching it wastes the slot and looks careless
+    # to the recipient. This module had no concept of "us" at all.
+    ours = {
+        strip_www((r["source_domain"] or "").lower())
+        for r in fetch_all(
+            "SELECT DISTINCT source_domain FROM backlinks "
+            " WHERE source_domain IS NOT NULL"
+        )
+    }
+    intersection = [
+        r for r in top_referrers
+        if r["competitors_linked"] >= 2
+        and strip_www((r["source_domain"] or "").lower()) not in ours
+    ]
+    already_linking = sum(
+        1 for r in top_referrers
+        if r["competitors_linked"] >= 2
+        and strip_www((r["source_domain"] or "").lower()) in ours
+    )
+    if already_linking:
+        logger.info("Excluded %d referring domain(s) that already link to us",
+                    already_linking)
 
     anchors = fetch_all(
         """
@@ -259,6 +283,7 @@ def compute_analysis(competitor_ids: list[int]) -> dict:
         "per_competitor":              per_comp,
         "top_referring_domains_overall": top_referrers,
         "intersection":                intersection,
+        "already_linking_to_us":       already_linking,
         "anchor_distribution":         anchors,
     }
 
@@ -383,7 +408,7 @@ def write_markdown(analysis: dict, fetch_summary: dict) -> Path:
 
     parts.append(f"## Outreach prospects — domains linking to ≥2 primary threats ({len(analysis['intersection'])})")
     parts.append("")
-    parts.append("These are publications, directories, or partner sites that already cover competitors in this space. They're the highest-leverage outreach targets because they've already shown willingness to link to companies like Damco's.")
+    parts.append(f"These are publications, directories, or partner sites that already cover competitors in this space. They're the highest-leverage outreach targets because they've already shown willingness to link to companies like {profile().brand_name}.")
     parts.append("")
     if not analysis["intersection"]:
         parts.append("_None yet — needs backlink data for multiple competitors._")
@@ -571,7 +596,7 @@ def run(threat_tiers: tuple[str, ...] = DEFAULT_THREAT_TIERS,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco Competitor Backlink Analyzer")
+    parser = argparse.ArgumentParser(description="Competitor Backlink Analyzer")
     parser.add_argument("--threat-tier", default=",".join(DEFAULT_THREAT_TIERS),
                         help=f"Comma-separated tiers (default: {','.join(DEFAULT_THREAT_TIERS)})")
     parser.add_argument("--domain", help="Pull only this specific competitor domain")

@@ -69,6 +69,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.database import connection, fetch_all, record_agent_run
+from common.tenant import profile
 
 
 logger = logging.getLogger("vendor_scorer")
@@ -100,7 +101,11 @@ def load_activity_aggregates(only_active: bool) -> list[dict]:
                pt.niche,
                pt.last_contacted                       AS pt_last_contacted,
                count(oa.*)                             AS attempts,
-               count(*) FILTER (WHERE oa.status NOT IN ('draft', 'no_response')) AS responses,
+               -- 'submitted' means we sent it, not that they replied. Counting
+               -- it as a response made every ignored pitch look answered, which
+               -- inflated response_rate and meant the auto-'exhausted' rule
+               -- below could essentially never fire.
+               count(*) FILTER (WHERE oa.status NOT IN ('draft', 'submitted', 'no_response')) AS responses,
                count(*) FILTER (WHERE oa.status = 'published')   AS publications,
                count(*) FILTER (WHERE oa.status = 'rejected')    AS rejections,
                count(*) FILTER (WHERE oa.status = 'no_response') AS no_responses,
@@ -204,7 +209,10 @@ def compute_scores(rows: list[dict],
         else:
             recency_score = 100.0 * (1.0 - (days_since_last - 30) / (RECENCY_DECAY_DAYS - 30))
 
-        # DA score: scale 0-100 DA to 0-100 directly (clamp)
+        # backlinks.domain_authority is stored 0-100 (the connector normalizes
+        # DataForSEO's raw 0-1000 rank). This clamp is a safety net, not a
+        # scaler — it used to saturate every platform at 100 because the raw
+        # value was landing here unscaled.
         platform_da = avg_da.get(r["platform_id"]) or (float(r["pt_da"]) if r["pt_da"] else 0.0)
         da_score = max(0.0, min(100.0, platform_da))
 
@@ -539,7 +547,8 @@ def run(only_active: bool = False,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco Outreach Vendor Scorer")
+    parser = argparse.ArgumentParser(
+        description=f"{profile().brand_name} Outreach Vendor Scorer")
     parser.add_argument("--only-active", action="store_true",
                         help="Restrict to platforms with status='active'")
     parser.add_argument("--exhaust-below", type=float, default=DEFAULT_EXHAUST_BELOW_PCT,

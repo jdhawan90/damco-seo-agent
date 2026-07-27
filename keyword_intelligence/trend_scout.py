@@ -58,6 +58,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import logging
@@ -83,6 +84,7 @@ from common.connectors.dataforseo import (
 )
 from common.database import connection, fetch_all, record_agent_run
 from common.llm import LLMUnavailableError, call_claude
+from common.tenant import profile, system_preamble
 
 
 logger = logging.getLogger(__name__)
@@ -177,144 +179,37 @@ essentially effectively particularly especially generally
 typically usually often sometimes always never still yet also too
 """.split())
 
-# News nouns. A phrase built only from an offering marker plus one of these
-# is a headline, not a search query: "ai models", "cloud era", "data boom".
-GENERIC_HEADS: frozenset[str] = frozenset("""
-model models era adoption capability capabilities control boom hype
-race wars war giant giants startup startups world future space landscape
-ecosystem revolution wave shift push move moves deal deals funding round
-rounds launch launches feature features update updates version release
-releases announcement partnership acquisition investment growth spending
-budget budgets leader leaders leadership expert experts user users
-customer customers team teams worker workers job jobs skill skills
-trend trends story stories thing things stuff level levels part parts
-piece side point points area areas effort efforts plan plans idea ideas
-question questions answer answers result results change changes
-""".split())
+# The tenant-specific half of the vocabulary — news nouns, commercial
+# tokens, and the offering token map — lives in the tenant profile.
+#
+# Wrapped rather than read inline for two reasons: importing this module
+# must not touch the database, and `offering_matchers` / `offering_marker_words`
+# rebuild their collections on every property access while _is_viable_phrase
+# runs once per extracted n-gram — tens of thousands of times a run.
 
-# A phrase is only worth proposing as a keyword if it reads like something
-# someone would search. These are the tokens that make a phrase commercial.
-COMMERCIAL_TOKENS: frozenset[str] = frozenset("""
-services service solutions solution platform platforms software tool tools
-consulting consultancy consultant consultants company companies vendor vendors
-partner partners provider providers agency agencies firm firms
-implementation integration migration modernization modernisation transformation
-automation orchestration optimization optimisation governance compliance
-strategy roadmap framework architecture deployment adoption enablement
-management monitoring analytics engineering development outsourcing
-support maintenance managed hosted cloud-based enterprise
-pricing cost benefits examples use-cases comparison alternatives
-""".split())
+@functools.lru_cache(maxsize=1)
+def _commercial_tokens() -> frozenset[str]:
+    """Tokens that make a phrase read like something someone would search."""
+    return profile().vocab("commercial_tokens")
 
-# Token → offering. First match by specificity wins; see _classify_by_rule.
-# Mirrors the 15 offerings currently in `keywords`.
-OFFERING_TOKENS: dict[str, tuple[str, ...]] = {
-    "AI": (
-        "ai", "artificial intelligence", "machine learning", "genai",
-        "generative ai", "llm", "large language model", "agentic", "agentic ai",
-        "ai agent", "copilot", "rag", "retrieval augmented", "prompt",
-        "foundation model", "mlops", "computer vision", "nlp", "deep learning",
-        "fine-tuning", "inference", "vector database", "embedding",
-    ),
-    "Salesforce": (
-        "salesforce", "sfdc", "apex", "lightning", "sales cloud",
-        "service cloud", "marketing cloud", "experience cloud", "einstein",
-        "agentforce", "mulesoft", "tableau", "crm", "data cloud", "slack",
-        "revenue cloud", "cpq", "field service lightning",
-    ),
-    "Insurance": (
-        "insurance", "insurtech", "underwriting", "claims", "policy admin",
-        "policyholder", "actuarial", "reinsurance", "broker", "carrier",
-        "p&c", "life and annuity", "annuity", "guidewire", "duck creek",
-        "premium", "loss run", "first notice of loss", "fnol",
-    ),
-    "BPM": (
-        "bpm", "business process", "process mining", "workflow", "back office",
-        "data entry", "data annotation", "data labeling", "data labelling",
-        "document processing", "data validation", "data enrichment",
-        "shared services", "bpo", "outsourcing", "transaction processing",
-    ),
-    "IPA": (
-        "rpa", "robotic process automation", "intelligent automation",
-        "hyperautomation", "uipath", "automation anywhere", "blue prism",
-        "idp", "intelligent document processing", "ocr", "power automate",
-        "process automation", "cognitive automation",
-    ),
-    "Data Engineering": (
-        "data engineering", "data pipeline", "etl", "elt", "data warehouse",
-        "data lake", "lakehouse", "databricks", "snowflake", "dbt",
-        "data mesh", "data fabric", "data catalog", "data quality",
-        "data governance", "business intelligence", "power bi", "airflow",
-        "streaming", "kafka", "reverse etl", "semantic layer",
-    ),
-    "Cloud": (
-        "cloud", "aws", "amazon web services", "gcp", "google cloud",
-        "kubernetes", "k8s", "container", "docker", "serverless", "terraform",
-        "iac", "infrastructure as code", "finops", "cloud migration",
-        "multi-cloud", "hybrid cloud", "cloud native", "devops", "sre",
-        "platform engineering", "observability",
-    ),
-    "Microsoft": (
-        "microsoft", "azure", "dynamics 365", "dynamics", "power platform",
-        "powerapps", "power apps", "power bi", "sharepoint", "microsoft 365",
-        "office 365", "teams", "fabric", "entra", "copilot studio", ".net",
-        "sql server",
-    ),
-    "App Dev": (
-        "application development", "app development", "software development",
-        "product engineering", "application modernization",
-        "application modernisation", "legacy modernization", "microservices",
-        "api", "full stack", "mobile app", "react", "node", "java",
-        "application support", "application maintenance", "qa", "testing",
-        "sdlc", "ci/cd",
-    ),
-    "AS400": (
-        "as400", "as/400", "ibm i", "iseries", "i series", "rpg", "rpgle",
-        "cl program", "db2", "power systems", "midrange", "green screen",
-        "cobol",
-    ),
-    "Web3": (
-        "web3", "blockchain", "smart contract", "solidity", "ethereum",
-        "defi", "nft", "tokenization", "tokenisation", "dao", "crypto",
-        "distributed ledger", "hyperledger", "zero knowledge", "wallet",
-    ),
-    "LC/NC": (
-        "low code", "low-code", "no code", "no-code", "citizen developer",
-        "mendix", "outsystems", "appian", "bubble", "retool", "airtable",
-        "drag and drop",
-    ),
-    "Healthcare": (
-        "healthcare", "health care", "hipaa", "ehr", "emr", "epic",
-        "patient", "clinical", "telehealth", "hl7", "fhir", "revenue cycle",
-        "medical billing", "payer", "provider network", "interoperability",
-    ),
-    "vCTO": (
-        "vcto", "virtual cto", "fractional cto", "it strategy", "it roadmap",
-        "technology advisory", "digital strategy", "it leadership",
-        "technology consulting", "cio advisory", "it assessment",
-    ),
-    "IT Staffing": (
-        "it staffing", "staff augmentation", "staffing", "offshore team",
-        "nearshore", "dedicated team", "hiring developers", "talent",
-        "contract to hire", "recruitment",
-    ),
-}
 
-# Longer phrases are more specific — match them before single tokens so
-# "power bi" claims Data Engineering before "bi" can claim anything.
-_OFFERING_MATCHERS: list[tuple[str, str]] = sorted(
-    ((token, offering) for offering, tokens in OFFERING_TOKENS.items() for token in tokens),
-    key=lambda pair: -len(pair[0]),
-)
+@functools.lru_cache(maxsize=1)
+def _generic_heads() -> frozenset[str]:
+    """News nouns. Offering marker + one of these is a headline, not a query."""
+    return profile().vocab("generic_heads")
 
-# Every individual word appearing anywhere in OFFERING_TOKENS. Used by the
-# head-noun gate to recognize "this phrase is just <our topic> + <news noun>".
-_OFFERING_MARKER_WORDS: frozenset[str] = frozenset(
-    word
-    for tokens in OFFERING_TOKENS.values()
-    for token in tokens
-    for word in token.split()
-)
+
+@functools.lru_cache(maxsize=1)
+def _offering_matchers() -> tuple[tuple[str, str], ...]:
+    """(token, offering) longest-first, so "power bi" outranks "bi"."""
+    return profile().offering_matchers
+
+
+@functools.lru_cache(maxsize=1)
+def _offering_marker_words() -> frozenset[str]:
+    """Every individual word appearing in any offering token."""
+    return profile().offering_marker_words
+
 
 # Two chars minimum: a one-letter token is almost always the orphaned half of
 # a split possessive ("Google's" -> "google", "s"), which produced phrases
@@ -706,9 +601,10 @@ def _is_viable_phrase(gram: list[str]) -> bool:
     #    and "ai agents" survive because neither leans on a news noun.
     #    A commercial token ("services", "migration", "platform") always
     #    rescues the phrase — that's the shape of a real query.
-    if not any(t in COMMERCIAL_TOKENS for t in content):
-        if any(t in GENERIC_HEADS for t in content) and all(
-            t in _OFFERING_MARKER_WORDS or t in GENERIC_HEADS for t in content
+    if not any(t in _commercial_tokens() for t in content):
+        heads, markers = _generic_heads(), _offering_marker_words()
+        if any(t in heads for t in content) and all(
+            t in markers or t in heads for t in content
         ):
             return False
 
@@ -797,7 +693,7 @@ def filter_candidates(
             continue
 
         rule_offering = _classify_by_rule(phrase)
-        has_commercial = bool(_token_set(phrase) & COMMERCIAL_TOKENS)
+        has_commercial = bool(_token_set(phrase) & _commercial_tokens())
         if not rule_offering and not has_commercial:
             continue
 
@@ -906,9 +802,46 @@ def _is_contiguous_sublist(needle: list[str], haystack: list[str]) -> bool:
 def _classify_by_rule(phrase: str) -> str | None:
     """Longest matching offering token wins. Returns None if nothing matches."""
     padded = f" {phrase} "
-    for token, offering in _OFFERING_MATCHERS:
+    for token, offering in _offering_matchers():
         if f" {token} " in padded:
             return offering
+    return None
+
+
+# Phrases that open with these read as someone learning, not someone buying.
+_INFORMATIONAL_OPENERS: tuple[str, ...] = (
+    "what is", "what are", "how to", "how do", "how does", "why is", "why do",
+    "when to", "guide to", "introduction to", "types of", "examples of",
+    "difference between", "benefits of", "meaning of",
+)
+
+# Buying signals that go beyond a generic service noun.
+_TRANSACTIONAL_TOKENS: frozenset[str] = frozenset(
+    "pricing price cost quote hire buy purchase demo trial rates".split()
+)
+
+
+def _infer_intent(phrase: str, has_commercial: bool) -> str | None:
+    """
+    Rule-based intent, in the same vocabulary the LLM classifier uses
+    (informational / commercial / transactional / navigational).
+
+    Without this, only LLM-classified candidates ever carried an `intent`,
+    so rule- and hint-classified ones could never earn the 1.15x commercial
+    multiplier in score_candidate() — roughly 80% of candidates were
+    systematically under-scored relative to whichever ones the LLM happened
+    to handle. `intent` also lands in `keywords.intent` on promotion, so the
+    gap outlived the trend run.
+    """
+    p = f" {phrase.strip().lower()} "
+    tokens = set(p.split())
+
+    if tokens & _TRANSACTIONAL_TOKENS:
+        return "transactional"
+    if any(p.startswith(f" {opener} ") for opener in _INFORMATIONAL_OPENERS):
+        return "informational"
+    if has_commercial or (tokens & _commercial_tokens()):
+        return "commercial"
     return None
 
 
@@ -920,6 +853,9 @@ def _nearest_tracked(phrase: str, tracked: list[dict]) -> tuple[str | None, floa
     shared concepts, not shared characters: "salesforce implementation
     services" and "services for salesforce implementation" are the same
     keyword, and their edit distance is large.
+
+    Blind to paraphrase, though — see `_nearest_tracked_semantic`, which
+    supersedes this when embeddings are available.
     """
     phrase_tokens = _token_set(phrase)
     if not phrase_tokens:
@@ -940,15 +876,118 @@ def _nearest_tracked(phrase: str, tracked: list[dict]) -> tuple[str | None, floa
     return best_kw, round(best_sim, 3)
 
 
+def build_semantic_index(phrases: list[str], tracked: list[dict]) -> dict | None:
+    """
+    Embed the candidate phrases and the tracked keyword set once per run.
+
+    Returns a lookup for `_nearest_tracked_semantic`, or None when embeddings
+    are unavailable — in which case callers keep using Jaccard and the run
+    proceeds exactly as before.
+
+    Batched deliberately: one call covering everything, then pure arithmetic
+    per comparison. Embedding per candidate inside the scoring loop would turn
+    a cent into a bill.
+    """
+    if not phrases or not tracked:
+        return None
+
+    from common.connectors.embeddings import embed_cached, is_available
+
+    if not is_available():
+        logger.debug("Embeddings unavailable — novelty falls back to Jaccard")
+        return None
+
+    tracked_keywords = [t["keyword"] for t in tracked if t.get("keyword")]
+    vectors = embed_cached(tracked_keywords + list(phrases))
+    if not vectors:
+        return None
+
+    tracked_vectors = {k: v for k, v in vectors.items() if k in set(tracked_keywords)}
+    if not tracked_vectors:
+        return None
+
+    return {"tracked": tracked_vectors, "all": vectors}
+
+
+def refine_novelty_semantic(candidates: list[dict], tracked: list[dict]) -> dict:
+    """
+    Re-check novelty for the surviving candidates using embeddings.
+
+    Runs once, over the final candidate list, after Jaccard has already done
+    the cheap pass. Only ever makes a candidate *less* novel — the token
+    overlap Jaccard found is real, so a high Jaccard score is never overridden
+    downward by a lower cosine.
+
+    Returns counters. Silently a no-op when embeddings are unavailable.
+    """
+    stats = {"checked": 0, "demoted": 0, "reason": None}
+    if not candidates or not tracked:
+        stats["reason"] = "nothing to compare"
+        return stats
+
+    index = build_semantic_index([c["keyword"] for c in candidates], tracked)
+    if index is None:
+        stats["reason"] = "embeddings unavailable — Jaccard result kept"
+        return stats
+
+    for c in candidates:
+        got = _nearest_tracked_semantic(c["keyword"], index)
+        if got is None:
+            continue
+        label, score = got
+        stats["checked"] += 1
+
+        # Keep whichever signal says "less novel". Jaccard finding real token
+        # overlap is evidence in its own right; embeddings add paraphrase
+        # detection on top rather than replacing it.
+        if score <= (c.get("nearest_similarity") or 0.0):
+            continue
+
+        was_novel = c.get("is_novel", True)
+        c["nearest_tracked"] = label
+        c["nearest_similarity"] = score
+        c["is_novel"] = score < NOVELTY_SIMILARITY_THRESHOLD
+        if was_novel and not c["is_novel"]:
+            stats["demoted"] += 1
+            logger.info("Semantic near-duplicate: %r ~ tracked %r (%.2f)",
+                        c["keyword"], label, score)
+    return stats
+
+
+def _nearest_tracked_semantic(phrase: str, index: dict) -> tuple[str | None, float] | None:
+    """
+    Closest tracked keyword by cosine similarity over embeddings.
+
+    Returns None when this particular phrase has no vector — the caller then
+    falls back to Jaccard for that one phrase rather than the whole run.
+
+    This is the guard on recurring spend: a promoted keyword costs money on
+    every future rank-tracker run, and Jaccard was waving through paraphrases
+    of keywords already tracked.
+    """
+    from common.connectors.embeddings import nearest
+
+    vector = index["all"].get(phrase.strip())
+    if vector is None:
+        return None
+    label, score = nearest(vector, index["tracked"])
+    return label, round(score, 3)
+
+
 # ---------------------------------------------------------------------------
 # Process — offering classification (rule first, Claude for the residue)
 # ---------------------------------------------------------------------------
 
-CLASSIFIER_SYSTEM = (
-    "You are an SEO keyword strategist for Damco Solutions, a B2B IT services "
-    "company. You classify emerging industry phrases into service offerings and "
-    "reshape them into realistic search queries that a buyer would actually type."
-)
+def _classifier_system() -> str:
+    """
+    The system prompt. Brand identity enters here and nowhere else — the user
+    prompt below stays tenant-neutral by construction.
+    """
+    return system_preamble(
+        "You are an SEO keyword strategist. You classify emerging industry "
+        "phrases into service offerings and reshape them into realistic search "
+        "queries that a buyer would actually type."
+    )
 
 
 def build_classifier_prompt(phrases: list[dict], offerings: list[str]) -> str:
@@ -957,8 +996,8 @@ def build_classifier_prompt(phrases: list[dict], offerings: list[str]) -> str:
     phrase is about, and reshape a news-shaped phrase into a search-shaped one.
     """
     lines = [
-        "Below are phrases trending in IT industry publications and practitioner "
-        "communities. Damco Solutions sells these service offerings:",
+        "Below are phrases trending in industry publications and practitioner "
+        "communities. These are the service offerings in scope:",
         "",
         ", ".join(offerings),
         "",
@@ -977,8 +1016,9 @@ def build_classifier_prompt(phrases: list[dict], offerings: list[str]) -> str:
         "4. `confidence` — 0.0 to 1.0, how sure you are about the offering.",
         "",
         "Be strict with \"none\". A phrase must describe technology or a business "
-        "problem Damco could sell against. When in doubt, answer \"none\" — a false "
-        "positive wastes an analyst's review time and a rank-tracking budget.",
+        "problem one of the offerings above could be sold against. When in doubt, "
+        "answer \"none\" — a false positive wastes an analyst's review time and a "
+        "rank-tracking budget.",
         "",
         "Phrases:",
     ]
@@ -1017,7 +1057,7 @@ def classify_with_llm(phrases: list[dict], offerings: list[str]) -> dict[str, di
         text, usage = call_claude(
             prompt,
             tier="cheap",           # classification is exactly what haiku is for
-            system=CLASSIFIER_SYSTEM,
+            system=_classifier_system(),
             max_tokens=8000,
             temperature=0.2,        # low: we want consistent labels, not creativity
         )
@@ -1099,8 +1139,13 @@ def enrich_with_volume(candidates: list[dict], max_lookups: int) -> dict:
         return {"looked_up": 0, "matched": 0, "cost_usd": 0.0, "error": None}
 
     terms = [c["keyword"] for c in lookups]
+    p = profile()
     try:
-        results = get_search_volume(terms)
+        # Explicit market: volume for the tenant's location/language, not
+        # whatever the connector happens to default to.
+        results = get_search_volume(
+            terms, location_code=p.location_code, language_code=p.language_code
+        )
     except DataForSEOError as exc:
         logger.warning("Keyword Planner lookup failed (non-fatal): %s", exc)
         return {"looked_up": len(terms), "matched": 0, "cost_usd": 0.0, "error": str(exc)}
@@ -1817,6 +1862,7 @@ def run(
             "nearest_tracked": entry["nearest_tracked"],
             "nearest_similarity": entry["nearest_similarity"],
             "is_novel":        entry["is_novel"],
+            "intent":          _infer_intent(entry["phrase"], entry["has_commercial"]),
         }
 
         if rule_offering:
@@ -1859,7 +1905,10 @@ def run(
                 "offering":        got["offering"],
                 "offering_confidence": got["confidence"],
                 "classification_method": "llm",
-                "intent":          got["intent"],
+                # LLM intent wins when present; fall back to the rule so a
+                # partial LLM response can't leave the candidate unscored.
+                "intent":          got["intent"] or _infer_intent(
+                                       got["keyword"], entry["has_commercial"]),
                 "mention_count":   entry["mention_count"],
                 "weighted_count":  entry["weighted_count"],
                 "source_spread":   len(entry["source_ids"]),
@@ -1890,6 +1939,19 @@ def run(
                                             key=lambda c: -c["weighted_count"]))
     print(f"  Candidates:          {len(candidates)} "
           f"(deduped {before_collapse}, collapsed {before_collapse - len(candidates)} sub-phrases)")
+
+    # ---- Semantic novelty re-check ----------------------------------------
+    # Jaccard already ran as a cheap prefilter during extraction. It cannot see
+    # paraphrase, so re-check the survivors — a small batch by this point —
+    # against embeddings. This is the guard on recurring spend: every promoted
+    # keyword costs money on every future rank-tracker run, and a paraphrase of
+    # something already tracked buys nothing.
+    semantic_stats = refine_novelty_semantic(candidates, tracked)
+    if semantic_stats["checked"]:
+        print(f"  Semantic novelty:    {semantic_stats['checked']} checked, "
+              f"{semantic_stats['demoted']} reclassified as near-duplicates")
+    elif semantic_stats["reason"]:
+        print(f"  Semantic novelty:    skipped ({semantic_stats['reason']})")
 
     # ---- Volume -----------------------------------------------------------
     volume_stats = {"looked_up": 0, "matched": 0, "cost_usd": 0.0, "error": None}
@@ -1994,7 +2056,8 @@ def run(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Damco Trend Scout — discover emerging industry keywords",
+        description=f"{profile().brand_name} Trend Scout — discover emerging "
+                    f"industry keywords",
     )
     parser.add_argument("--days", type=int, default=DEFAULT_LOOKBACK_DAYS,
                         help=f"Lookback window in days (default: {DEFAULT_LOOKBACK_DAYS})")

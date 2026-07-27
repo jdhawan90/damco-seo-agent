@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from common.config import settings
 from common.database import connection, fetch_all, record_agent_run
 from common.connectors.dataforseo import get_serp_rankings, drain_ready_serp_tasks, DataForSEOError
+from common.tenant import profile
 
 
 # Observed DataForSEO SERP pricing on 2026-05-15 (location_code=2840, depth=100):
@@ -62,37 +63,17 @@ logger = logging.getLogger("rank_tracker")
 
 AGENT_NAME = "keyword_intelligence.rank_tracker"
 
-# Damco brand domains to match in SERP results (case-insensitive)
-BRAND_DOMAINS = {"damcogroup.com", "achieva.ai", "damcodigital.com"}
-
 # DataForSEO batch limit
 BATCH_SIZE = 100
 
-# Top N for competition tracking (separate concern from Damco brand match,
+# Top N for competition tracking (separate concern from the brand match,
 # which scans the full SERP).
 TOP_N = 10
 
-# Heuristic categorization buckets. Default-NULL when uncertain — humans curate.
-BIG_TECH_DOMAINS = {
-    "cloud.google.com", "google.com", "developers.google.com",
-    "aws.amazon.com", "amazon.com",
-    "learn.microsoft.com", "microsoft.com", "azure.microsoft.com",
-    "developer.apple.com", "apple.com",
-    "openai.com", "anthropic.com",
-    "meta.com", "developers.facebook.com",
-}
-
-KNOWN_AGGREGATORS = {
-    "g2.com", "capterra.com", "gartner.com", "forrester.com",
-    "trustradius.com", "softwareadvice.com",
-    "clutch.co", "goodfirms.co", "designrush.com",
-    "forbes.com", "techcrunch.com",
-}
-
-INFORMATIONAL_DOMAINS = {
-    "wikipedia.org", "en.wikipedia.org",
-    "youtube.com", "reddit.com", "quora.com", "medium.com",
-}
+# Owned domains and the heuristic categorization buckets (big tech,
+# aggregators, informational) now come from the tenant profile —
+# profile().owns() and profile().vocab(...). Loaded lazily inside the
+# functions below so importing this module never touches the database.
 
 
 # ---------------------------------------------------------------------------
@@ -114,12 +95,18 @@ def rank_bucket(position: int | None) -> str:
 
 
 def find_brand_position(serp_items: list[dict]) -> dict | None:
-    """First Damco-domain item in a list of organic SERP items, or None."""
+    """
+    First owned-domain item in a list of organic SERP items, or None.
+
+    `profile().owns()` is an exact host match (plus subdomains). The
+    substring test this replaced (`if brand in domain`) also matched
+    "notdamcogroup.com.evil.example" — a false positive on the one metric
+    executives read week to week.
+    """
+    p = profile()
     for item in serp_items:
-        domain = (item.get("domain") or "").lower()
-        for brand in BRAND_DOMAINS:
-            if brand in domain:
-                return item
+        if p.owns(item.get("domain") or ""):
+            return item
     return None
 
 
@@ -182,7 +169,7 @@ def categorize_page_type(url: str | None, title: str | None, domain: str | None)
     if path in ("", "/", "/index.html"):
         return "homepage"
 
-    if domain in BIG_TECH_DOMAINS or domain.startswith("docs."):
+    if domain in profile().vocab("big_tech_domains") or domain.startswith("docs."):
         return "docs"
     if "/blog/" in url or "/insights/" in url or "/articles/" in url:
         return "blog"
@@ -198,15 +185,132 @@ def categorize_competitor(domain: str | None) -> str | None:
     if not domain:
         return None
     d = domain.lower()
-    if d in BRAND_DOMAINS:
+    p = profile()
+    if p.owns(d):
         return "internal"
-    if d in BIG_TECH_DOMAINS:
+    if d in p.vocab("big_tech_domains"):
         return "big_tech"
-    if d in INFORMATIONAL_DOMAINS or d.endswith(".wikipedia.org"):
+    if d in p.vocab("informational_domains") or d.endswith(".wikipedia.org"):
         return "informational"
-    if d in KNOWN_AGGREGATORS:
+    if d in p.vocab("aggregator_domains"):
         return "aggregator"
-    return None  # let humans set 'direct' / 'adjacent' on review
+    return None  # unresolved — see classify_competitors_with_llm
+
+
+# ---------------------------------------------------------------------------
+# Competitor categorization fallback
+#
+# The rule above resolves only domains that appear on a hand-maintained list,
+# so it returns None for nearly every real competitor and the `competitors`
+# table fills with NULL categories nobody ever gets round to curating.
+#
+# Deciding whether a domain is a direct competitor, an adjacent vendor or an
+# unrelated publisher is judgment over a name and a page title — a genuine
+# language task, and the one the rule explicitly deferred to humans.
+#
+# Cost is bounded by discovery, not inventory: only newly-stubbed domains with
+# a NULL category are ever sent, one batched call per run, and the answer is
+# written to `competitors.category` so a domain is judged exactly once.
+# ---------------------------------------------------------------------------
+
+VALID_COMPETITOR_CATEGORIES = ("direct", "adjacent", "big_tech", "aggregator",
+                               "informational", "unrelated")
+MAX_LLM_COMPETITORS = 100
+
+
+def classify_competitors_with_llm(rows: list[dict]) -> dict[str, str]:
+    """
+    Categorize uncategorized competitor domains. `rows` needs
+    `competitor_domain` and optionally a representative `url_title`.
+
+    Returns {domain: category} for confident answers only. Anything else is
+    left NULL rather than guessed — a wrong 'direct' label misdirects the
+    whole competitive-intelligence agent downstream.
+    """
+    if not rows:
+        return {}
+
+    batch = rows[:MAX_LLM_COMPETITORS]
+    listing = "\n".join(
+        f"  {r['competitor_domain']}"
+        + (f"  — example SERP title: {r['url_title']!r}" if r.get("url_title") else "")
+        for r in batch
+    )
+    prompt = (
+        "These domains appear in the search results for our tracked keywords. "
+        "Categorize each one from our point of view.\n\n"
+        "  direct        sells substantially the same services we do\n"
+        "  adjacent      sells related services to the same buyers, but not ours\n"
+        "  big_tech      a major platform vendor's own site or documentation\n"
+        "  aggregator    a directory, review site or 'top N vendors' listing\n"
+        "  informational a reference, news or community site, not a vendor\n"
+        "  unrelated     nothing to do with our market\n\n"
+        f"DOMAINS:\n{listing}\n\n"
+        'Return JSON only: {"<domain>": "<category>", ...}. Omit any domain '
+        "you are not confident about rather than guessing."
+    )
+
+    from common.llm import call_claude_json
+    from common.tenant import system_preamble
+
+    value, usage, error = call_claude_json(
+        prompt, fallback={}, tier="cheap", max_tokens=3000,
+        system=system_preamble("You are a competitive analyst."),
+    )
+    if error:
+        logger.info("Competitor categorization unavailable (%s) — %d domain(s) "
+                    "stay uncategorized", error, len(batch))
+        return {}
+    if not isinstance(value, dict):
+        return {}
+
+    known = {r["competitor_domain"] for r in batch}
+    out = {
+        dom: str(cat).strip().lower()
+        for dom, cat in value.items()
+        if dom in known and str(cat).strip().lower() in VALID_COMPETITOR_CATEGORIES
+    }
+    logger.info("Categorized %d of %d uncategorized competitor(s)", len(out), len(batch))
+    return out
+
+
+def categorize_new_competitors(use_llm: bool = True) -> int:
+    """
+    Fill in NULL categories for competitors seen in this run's SERPs.
+
+    Only touches rows where category IS NULL, so a human's curation is never
+    overwritten. Returns the number updated.
+    """
+    if not use_llm:
+        return 0
+
+    rows = fetch_all(
+        """
+        SELECT c.competitor_domain,
+               (SELECT cr.url_title FROM competitor_rankings cr
+                 WHERE cr.competitor_id = c.id AND cr.url_title IS NOT NULL
+                 ORDER BY cr.date DESC LIMIT 1) AS url_title
+          FROM competitors c
+         WHERE c.category IS NULL AND c.is_tracked = TRUE
+         ORDER BY c.keyword_appearance_count DESC NULLS LAST
+         LIMIT %s
+        """,
+        [MAX_LLM_COMPETITORS],
+    )
+    resolved = classify_competitors_with_llm(rows)
+    if not resolved:
+        return 0
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            for dom, cat in resolved.items():
+                cur.execute(
+                    "UPDATE competitors SET category = %s "
+                    " WHERE competitor_domain = %s AND category IS NULL",
+                    (cat, dom),
+                )
+        conn.commit()
+    return len(resolved)
 
 
 def severity_for(event_type: str, value: int | None = None) -> str:
@@ -267,11 +371,14 @@ def load_keywords(offering: str | None = None, only_due: bool = True) -> list[di
         sql = """
             SELECT k.id, k.keyword, k.offering, k.target_url, k.snapshot_frequency_days,
                    (SELECT MAX(date) FROM keyword_serp_snapshots
-                     WHERE keyword_id = k.id AND device = 'desktop') AS last_snapshot
+                     WHERE keyword_id = k.id AND device = %s) AS last_snapshot
               FROM keywords k
              WHERE k.status = 'active'
         """
-        params: list = []
+        # settings.DATAFORSEO_DEVICE, not a 'desktop' literal. The setting has
+        # existed since day one and was never referenced, so a mobile-first
+        # site would have been silently served desktop data.
+        params: list = [settings.DATAFORSEO_DEVICE]
         if offering:
             sql += " AND k.offering = %s"
             params.append(offering)
@@ -304,10 +411,10 @@ def load_previous_snapshot(cur, keyword_id: int) -> dict | None:
         """
         SELECT date, serp_features, ai_overview_present, top_10_domains, damco_position
           FROM keyword_serp_snapshots
-         WHERE keyword_id = %s AND device = 'desktop' AND date < CURRENT_DATE
+         WHERE keyword_id = %s AND device = %s AND date < CURRENT_DATE
          ORDER BY date DESC LIMIT 1
         """,
-        (keyword_id,),
+        (keyword_id, settings.DATAFORSEO_DEVICE),
     )
     row = cur.fetchone()
     if not row:
@@ -559,7 +666,7 @@ def write_keyword_serp_snapshot(
             (keyword_id, date, location_code, device, serp_features,
              ai_overview_present, ai_overview_citations, total_results_seen,
              damco_position, damco_url, top_10_domains)
-        VALUES (%s, %s, %s, 'desktop', %s::jsonb,
+        VALUES (%s, %s, %s, %s, %s::jsonb,
                 %s, %s::jsonb, %s,
                 %s, %s, %s::jsonb)
         ON CONFLICT (keyword_id, date, device) DO UPDATE SET
@@ -573,6 +680,7 @@ def write_keyword_serp_snapshot(
         """,
         (
             keyword_id, run_date, settings.DATAFORSEO_LOCATION_CODE,
+            settings.DATAFORSEO_DEVICE,
             json.dumps(serp_features), ai_present, json.dumps(ai_citations),
             total_results, damco_position, damco_url, json.dumps(top_10_domains),
         ),
@@ -818,7 +926,7 @@ def _safe_console(s: str | None) -> str:
 def print_summary(results: list[dict], run_date: date) -> None:
     print()
     print(f"  {'=' * 72}")
-    print(f"   DAMCO Rank Tracker -- {run_date.isoformat()}")
+    print(f"   {profile().brand_name} Rank Tracker -- {run_date.isoformat()}")
     print(f"  {'=' * 72}")
     print()
 
@@ -848,7 +956,7 @@ def print_summary(results: list[dict], run_date: date) -> None:
 
 def run(offering: str | None = None, queue: str = "standard", dry_run: bool = False,
         skip_gsc: bool = False, gsc_days: int = 14, force_all: bool = False,
-        drain_ready: bool = False) -> dict:
+        drain_ready: bool = False, use_llm: bool = True) -> dict:
     start_time = time.monotonic()
     run_date = date.today()
 
@@ -989,6 +1097,16 @@ def run(offering: str | None = None, queue: str = "standard", dry_run: bool = Fa
             logger.error("refresh_offering_rollup failed: %s", exc)
             api_errors.append(f"refresh_view: {exc}")
 
+        # Categorize any competitors this run newly stubbed. Runs last and is
+        # wrapped: this is advisory enrichment, and a failure here must never
+        # cost us the ranking data already written above.
+        try:
+            n = categorize_new_competitors(use_llm=use_llm)
+            if n:
+                print(f"  Competitors categorized: {n}")
+        except Exception as exc:
+            logger.warning("competitor categorization failed: %s", exc)
+
     duration = time.monotonic() - start_time
     total = len(results)
     found = sum(1 for r in results if r["rank_position"] is not None)
@@ -1017,7 +1135,7 @@ def run(offering: str | None = None, queue: str = "standard", dry_run: bool = Fa
 
     print_summary(results, run_date)
     print(f"  Keywords tracked:     {total}")
-    print(f"  Damco found:          {found}")
+    print(f"  {profile().brand_name + ' found:':<22}{found}")
     print(f"  Not found:            {total - found - err_count}")
     print(f"  Errors:               {err_count}")
     print(f"  SERP snapshots:       {snapshots_written}")
@@ -1055,7 +1173,8 @@ def run(offering: str | None = None, queue: str = "standard", dry_run: bool = Fa
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco Keyword Rank Tracker")
+    parser = argparse.ArgumentParser(
+        description=f"{profile().brand_name} Keyword Rank Tracker")
     parser.add_argument("--offering", help="Track only keywords for a specific offering")
     parser.add_argument("--queue", default="standard", choices=["standard", "live"],
                         help="DataForSEO queue tier (default: standard)")
@@ -1063,6 +1182,9 @@ def main() -> None:
                         help="Fetch rankings but don't write to DB")
     parser.add_argument("--all", dest="force_all", action="store_true",
                         help="Force a snapshot for every active keyword (ignores fortnightly cadence)")
+    parser.add_argument("--no-llm", action="store_true",
+                        help="Skip competitor categorization; leave new "
+                             "competitors uncategorized for human review")
     parser.add_argument("--drain-ready", dest="drain_ready", action="store_true",
                         help="Recovery mode: pull all already-completed tasks from DataForSEO's "
                              "ready queue (no new task_post, no new spend). Useful after a polling "
@@ -1082,7 +1204,7 @@ def main() -> None:
 
     run(offering=args.offering, queue=args.queue, dry_run=args.dry_run,
         skip_gsc=args.skip_gsc, gsc_days=args.gsc_days, force_all=args.force_all,
-        drain_ready=args.drain_ready)
+        drain_ready=args.drain_ready, use_llm=not args.no_llm)
 
 
 if __name__ == "__main__":

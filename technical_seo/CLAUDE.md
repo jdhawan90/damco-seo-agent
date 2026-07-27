@@ -52,7 +52,9 @@ Every module follows the standard lifecycle. Connectors used:
 - `common.connectors.crawler` — built. Polite HTTP+HTML fetcher returning a `CrawlResult` (title, meta, canonical, headings, JSON-LD, microdata, links, images, word_count). Used by site_auditor, canonical_checker, internal_link_analyzer.
 - `common.connectors.pagespeed` — built. CWV + Lighthouse score. Used by cwv_monitor.
 
-Use rule-based logic throughout. No LLM required for this agent's core loop (internal_link_analyzer is the one exception — uses Claude API for anchor text generation).
+Use rule-based logic throughout. **All four modules are 100% deterministic — none imports `common/llm.py`.** This is deliberate, not a gap: every module in this folder opens, updates and auto-resolves rows in `technical_issues`, and that state machine depends on the same input producing the same issue set every run. A non-deterministic detector would make issues flap open and closed each cycle and corrupt `date_resolved` history.
+
+If AI is added here later it must write to a **separate advisory surface** (a report section, or a cached column written once per new URL) — never inline into a detector. LLM-assisted anchor recommendations for `internal_link_analyzer` remain deferred; the code explicitly defers them.
 
 ## Safety rules (will apply once implemented)
 

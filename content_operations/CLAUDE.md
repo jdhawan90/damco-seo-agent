@@ -40,7 +40,7 @@ Tables populated: `content_briefs`, `compliance_checks`, `pages` (glossary entri
 
 ## Operating contract
 
-Standard Read → Process → Write → Notify. LLM usage is justified and heavy here — `brief_generator` and parts of `compliance_checker` use `CLAUDE_MODEL_DEFAULT` for narrative generation and contextual quality checks. Rule-based logic handles the structured parts (keyword density, link counts, char limits).
+Standard Read → Process → Write → Notify. LLM usage is narrower than it looks: **`brief_generator` is the only module in this folder that calls the Claude API** (`CLAUDE_MODEL_DEFAULT`, for outline enrichment + intro hook + topic angle + unique POV, with a rule-based fallback). `compliance_checker`, `glossary_detector` and `concentration_checker` are 100% rule-based and import no LLM at all.
 
 ## Safety rules
 

@@ -83,6 +83,11 @@ DEFAULT_CADENCE_DAYS = 7
 DEFAULT_WORKERS = 4
 DEFAULT_TOP_N = 10   # Only monitor URLs that ranked top-N for any of our keywords
 
+# Identifies which algorithm produced a stored content_hash. Bump this
+# whenever the hash changes meaning, so the next run re-baselines instead of
+# reporting every tracked page as edited. See migration 016.
+CONTENT_HASH_ALGO = "text_v2"
+
 SIGNIFICANCE = {
     "title_change":     0.70,
     "structure_change": 0.60,
@@ -161,7 +166,7 @@ def load_previous_state(competitor_id: int, url: str) -> dict | None:
         """
         SELECT id, title, meta_description, h1, canonical_url, lang,
                word_count, schema_types, has_microdata, content_hash,
-               last_status, last_fetched_at
+               content_hash_algo, last_status, last_fetched_at
           FROM competitor_pages
          WHERE competitor_id = %s AND url = %s
          LIMIT 1
@@ -205,7 +210,7 @@ def extract_state(r: CrawlResult) -> dict:
             "title": None, "meta_description": None, "h1": None,
             "canonical_url": None, "lang": None,
             "word_count": None, "schema_types": [], "has_microdata": False,
-            "content_hash": None,
+            "content_hash": None, "content_hash_algo": None,
         }
     schema_types: set[str] = set()
     for block in (r.schema_jsonld or []):
@@ -219,12 +224,25 @@ def extract_state(r: CrawlResult) -> dict:
                 elif isinstance(t, str):
                     schema_types.add(t)
 
-    # Hash of visible text (already extracted by crawler; reproduce minimally)
-    content_for_hash = (r.title or "") + "|" + (r.meta_description or "") + "|" + " ".join(r.h1_tags or [])
-    # Best signal of body change: word_count + first 200 chars of body via re-hash of HTML body
-    # Here we use a small but stable proxy: title + meta + h1s + word_count bucket
-    body_proxy = f"wc={r.word_count}|" + content_for_hash
-    content_hash = hashlib.sha256(body_proxy.encode("utf-8", errors="replace")).hexdigest()
+    # Real hash of the page's visible text, computed by the crawler.
+    #
+    # This used to be a proxy — "wc=<n>|title|meta|h1" — which could not see a
+    # body rewrite at all: a competitor could replace every paragraph, land on
+    # the same word count and keep the title, and `content_update` never fired.
+    # Given this agent's whole job is detecting competitor content changes,
+    # that was the one thing it most needed to catch.
+    #
+    # Fall back to the old proxy only when the crawler produced no text (a
+    # non-HTML response, or a body over the size cap), so a page we cannot
+    # read does not masquerade as an unchanged one.
+    if r.text_hash:
+        content_hash = r.text_hash
+        algo = CONTENT_HASH_ALGO
+    else:
+        algo = "proxy_v1"
+        proxy = (f"wc={r.word_count}|{r.title or ''}|{r.meta_description or ''}|"
+                 + " ".join(r.h1_tags or []))
+        content_hash = hashlib.sha256(proxy.encode("utf-8", errors="replace")).hexdigest()
 
     return {
         "title":            r.title,
@@ -236,6 +254,7 @@ def extract_state(r: CrawlResult) -> dict:
         "schema_types":     sorted(schema_types),
         "has_microdata":    r.has_microdata,
         "content_hash":     content_hash,
+        "content_hash_algo": algo,
     }
 
 
@@ -331,7 +350,16 @@ def diff_state(prev: dict | None, curr: dict, result: CrawlResult) -> list[dict]
     # Content update — only fires if no other change above triggered, since
     # content_hash inherently changes when title/meta/h1 do.
     if not events:
-        if (prev.get("content_hash") or "") != (curr["content_hash"] or ""):
+        # Hashes produced by different algorithms are not comparable. When the
+        # stored one predates the switch to real body hashing, re-baseline
+        # silently rather than reporting 52 content changes that never
+        # happened — competitor_changes is append-only, so that noise would
+        # be permanent.
+        prev_algo = prev.get("content_hash_algo") or "proxy_v1"
+        if prev_algo != CONTENT_HASH_ALGO:
+            logger.debug("Re-baselining %s: stored hash was %s, now %s",
+                         curr.get("url") or "page", prev_algo, CONTENT_HASH_ALGO)
+        elif (prev.get("content_hash") or "") != (curr["content_hash"] or ""):
             wc_prev = prev.get("word_count") or 0
             wc_curr = curr["word_count"] or 0
             wc_pct = abs(wc_curr - wc_prev) / max(1, wc_prev) if wc_prev else 0
@@ -358,9 +386,9 @@ def upsert_competitor_page(cur, target: dict, state: dict, result: CrawlResult) 
         """
         INSERT INTO competitor_pages
             (competitor_id, url, title, meta_description, h1, canonical_url, lang,
-             word_count, schema_types, has_microdata, content_hash, last_status,
-             last_fetched_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, now())
+             word_count, schema_types, has_microdata, content_hash,
+             content_hash_algo, last_status, last_fetched_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, now())
         ON CONFLICT (competitor_id, url) DO UPDATE SET
             title            = EXCLUDED.title,
             meta_description = EXCLUDED.meta_description,
@@ -370,16 +398,18 @@ def upsert_competitor_page(cur, target: dict, state: dict, result: CrawlResult) 
             word_count       = EXCLUDED.word_count,
             schema_types     = EXCLUDED.schema_types,
             has_microdata    = EXCLUDED.has_microdata,
-            content_hash     = EXCLUDED.content_hash,
-            last_status      = EXCLUDED.last_status,
-            last_fetched_at  = now()
+            content_hash      = EXCLUDED.content_hash,
+            content_hash_algo = EXCLUDED.content_hash_algo,
+            last_status       = EXCLUDED.last_status,
+            last_fetched_at   = now()
         """,
         (
             target["competitor_id"], target["url"],
             state["title"], state["meta_description"], state["h1"],
             state["canonical_url"], state["lang"], state["word_count"],
             json.dumps(state["schema_types"]), state["has_microdata"],
-            state["content_hash"], result.status,
+            state["content_hash"], state.get("content_hash_algo") or CONTENT_HASH_ALGO,
+            result.status,
         ),
     )
 
@@ -545,7 +575,7 @@ def run(threat_tiers: tuple[str, ...] = DEFAULT_THREAT_TIERS,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco Competitor Monitor")
+    parser = argparse.ArgumentParser(description="Competitor Monitor")
     parser.add_argument("--threat-tier", default=",".join(DEFAULT_THREAT_TIERS),
                         help=f"Comma-separated tiers (default: {','.join(DEFAULT_THREAT_TIERS)}). "
                              "Allowed: primary, watch, peripheral, ignore.")

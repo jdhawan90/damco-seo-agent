@@ -17,7 +17,7 @@ What the LLM produces
 - Personalized body (200–350 words)
   - Opening: references a specific piece of the platform's recent
     editorial (we crawl their site briefly to provide context)
-  - Damco value prop tailored to their audience
+  - Brand value prop tailored to their audience
   - Specific link request with context
   - Soft CTA
 - One follow-up variant (60–120 words)
@@ -38,7 +38,7 @@ a templated skeleton when Anthropic credit is unavailable.
 
 Usage
 -----
-    # Personalized pitch for a platform → a Damco service page
+    # Personalized pitch for a platform → one of our service pages
     python -m offpage_links.outreach_drafter --platform-id 7 --target-page-id 42
 
     # Pitch tied to an offering rather than a specific page
@@ -71,6 +71,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from common.connectors.crawler import get_default_crawler
 from common.database import connection, fetch_all, fetch_one, record_agent_run
 from common.llm import LLMUnavailableError, call_claude
+from common.tenant import profile, system_preamble
 
 
 logger = logging.getLogger("outreach_drafter")
@@ -100,7 +101,7 @@ def load_target_page(target_page_id: int) -> dict | None:
 
 
 def load_offering_anchor_page(offering: str) -> dict | None:
-    """Pick the strongest Damco page to pitch for an offering."""
+    """Pick the strongest page of ours to pitch for an offering."""
     rows = fetch_all(
         """
         SELECT id, url, page_type, title
@@ -142,18 +143,28 @@ def crawl_platform_context(platform_url: str) -> dict:
 # LLM prompt
 # ---------------------------------------------------------------------------
 
-OUTREACH_SYSTEM = (
-    "You write outreach emails for B2B IT services and AI consulting firms. "
-    "Conservative tone. No outlandish claims. Never promise specific ranking "
-    "outcomes or numbers we don't have proof of. Cite the platform's own "
-    "editorial when context is provided. Keep emails skimmable: short paragraphs."
-)
+def outreach_system() -> str:
+    """
+    The system prompt.
+
+    Brand identity belongs here and nowhere else — `system_preamble` is the one
+    sanctioned place it enters a model call, which keeps the user prompt below
+    tenant-neutral by construction.
+    """
+    vertical = profile().vertical
+    role = (f"You write outreach emails for {vertical} firms."
+            if vertical else "You write outreach emails for B2B firms.")
+    return system_preamble(role) + (
+        "\nConservative tone. No outlandish claims. Never promise specific ranking "
+        "outcomes or numbers we don't have proof of. Cite the platform's own "
+        "editorial when context is provided. Keep emails skimmable: short paragraphs."
+    )
 
 
 def make_outreach_prompt(platform: dict, target_page: dict,
                           context: dict) -> str:
     recent = "\n".join(f"  - {t}" for t in (context.get("recent_topics") or [])[:6]) or "  (no editorial context available)"
-    return f"""Draft a personalized outreach email for a Damco Group SEO link request.
+    return f"""Draft a personalized outreach email for an SEO link request on our behalf.
 
 PLATFORM
   URL:               {platform['platform_url']}
@@ -164,7 +175,7 @@ PLATFORM
   Recent editorial topics they cover:
 {recent}
 
-TARGET DAMCO PAGE
+OUR TARGET PAGE
   URL:        {target_page['url']}
   Title:      {target_page.get('title') or '(no title yet)'}
   Page type:  {target_page.get('page_type') or '(unspecified)'}
@@ -174,16 +185,26 @@ Output a JSON object with these fields (and ONLY the JSON):
 
 {{
   "subject":   "<≤80 char subject line, specific and personal, not generic>",
-  "body":     "<200-350 word email body. Use \\n\\n between paragraphs. Opens by referencing the platform's editorial. Then introduces Damco's relevant capability (use the page above as the proof point). Then a specific link request — e.g. 'including our piece on X in your roundup on Y' or 'a guest post on Z'. Closes with a soft CTA. NO promises of specific outcomes.>",
+  "body":     "<200-350 word email body. Use \\n\\n between paragraphs. Opens by referencing the platform's editorial. Then introduces our relevant capability (use the page above as the proof point). Then a specific link request — e.g. 'including our piece on X in your roundup on Y' or 'a guest post on Z'. Closes with a soft CTA. NO promises of specific outcomes.>",
   "followup": "<60-120 word follow-up email body, sent 7 days later if no reply. Lighter touch.>",
   "rationale": "<1-2 sentence internal note: why this platform is a good fit for this page, and what we're banking on.>"
 }}"""
+# NOTE: `rationale` asks the model to invent a fit justification that
+# platform_finder already computed (competitor count, avg DA, niche relevance,
+# recency — all stored on platform_targets). The LLM cannot see those numbers,
+# so it guesses. Left as-is deliberately; wiring the real scores through is a
+# separate change.
 
 
 def fallback_template(platform: dict, target_page: dict, context: dict) -> dict:
     """Rule-based skeleton when LLM isn't available."""
     p_name = platform.get("platform_name") or platform["platform_url"]
     t_title = target_page.get("title") or target_page["url"]
+    # This is the path taken whenever Anthropic credit is unavailable, so the
+    # signature below ships on real drafts — it must name the tenant, not a
+    # baked-in company.
+    tenant = profile()
+    signature_url = (tenant.cta_url or f"https://{tenant.primary_domain}").rstrip("/")
     return {
         "subject":  f"Could fit {p_name}'s coverage of [TOPIC]",
         "body":     (
@@ -194,7 +215,7 @@ def fallback_template(platform: dict, target_page: dict, context: dict) -> dict:
             f"It covers [outline points — fill in 2-3 specific value props for THIS platform's audience].\n\n"
             f"If it's a fit, we'd be glad to either contribute a guest piece on the topic or be included "
             f"in a roundup. Happy to tailor.\n\n"
-            f"[Your name]\n[Damco Group | https://www.damcogroup.com]"
+            f"[Your name]\n[{tenant.brand_name} | {signature_url}]"
         ),
         "followup": (
             f"Hi [editor name] — just bumping this in case it got buried. "
@@ -213,7 +234,7 @@ def generate_outreach(platform: dict, target_page: dict, context: dict,
 
     prompt = make_outreach_prompt(platform, target_page, context)
     try:
-        text, usage = call_claude(prompt, tier="default", system=OUTREACH_SYSTEM,
+        text, usage = call_claude(prompt, tier="default", system=outreach_system(),
                                    max_tokens=2000, temperature=0.7)
     except LLMUnavailableError as exc:
         logger.warning("LLM unavailable, using rule-based skeleton: %s", exc)
@@ -340,7 +361,7 @@ def run(platform_id: int,
         return {"status": "error", "reason": "no target"}
 
     if not target_page:
-        logger.error("No Damco target page resolved for the given inputs.")
+        logger.error("No target page resolved for the given inputs.")
         return {"status": "error", "reason": "no target page"}
 
     context = {} if no_crawl else crawl_platform_context(platform["platform_url"])
@@ -398,7 +419,8 @@ def run(platform_id: int,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco Outreach Draft Generator")
+    parser = argparse.ArgumentParser(
+        description=f"{profile().brand_name} Outreach Draft Generator")
     parser.add_argument("--platform-id", type=int, required=True,
                         help="platform_targets.id")
     target = parser.add_mutually_exclusive_group(required=True)

@@ -21,7 +21,7 @@ For each target:
   4. Top 5 competitor reference URLs from the SERP we want to win
   5. Recommended heading outline (LLM-extends rule-based template using
      competitor titles as inspiration)
-  6. Internal linking suggestions (existing Damco pages in same offering)
+  6. Internal linking suggestions (existing own pages in same offering)
   7. AEO checklist (hardcoded — always present per the agent's safety rule)
   8. LLM-generated narrative sections (intro hook, topic angle, unique POV)
   9. Recommended word count (based on page_type + competitor avg)
@@ -79,6 +79,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.database import connection, fetch_all, record_agent_run
 from common.llm import call_claude, LLMUnavailableError
+from common.tenant import profile, system_preamble
 
 
 logger = logging.getLogger("brief_generator")
@@ -117,7 +118,11 @@ AEO_CHECKLIST = [
 # ---------------------------------------------------------------------------
 
 def load_keyword_with_context(keyword_id: int) -> dict | None:
-    """Pull a keyword + its latest Damco position + GSC stats + top-5 competitors."""
+    """Pull a keyword + our latest position + GSC stats + top-5 competitors.
+
+    The `damco_*` SQL aliases below are internal names that mirror existing
+    column names; they never reach a report.
+    """
     rows = fetch_all(
         """
         WITH latest_serp AS (
@@ -169,7 +174,7 @@ def load_top_competitors(keyword_id: int, n: int = 5) -> list[dict]:
 
 def load_coverage_gap_keywords(offering: str | None, limit: int) -> list[int]:
     """
-    Mirrors gap_analyzer.classify(): keywords where Damco isn't in the top 100
+    Mirrors gap_analyzer.classify(): keywords where we aren't in the top 100
     and at least one tracked competitor IS in the top 10. Ranked by:
         GSC impressions desc (real demand)
         then count of top-10 tracked competitors desc
@@ -228,7 +233,7 @@ def load_coverage_gap_keywords(offering: str | None, limit: int) -> list[int]:
 
 def load_internal_link_targets(offering: str | None, exclude_url: str | None) -> list[dict]:
     """
-    Candidate Damco pages for internal linking. We DO NOT filter by
+    Candidate own-site pages for internal linking. We DO NOT filter by
     pages.offering because that column is sparsely populated (the
     sitemap discoverer doesn't know which offering a URL belongs to —
     that's a content-team labeling task we haven't backfilled).
@@ -359,35 +364,35 @@ def derive_secondary_keywords(primary_kw_id: int, primary_kw: str,
             for _, r in scored[:max_secondary]]
 
 
+# Emergency skeleton, used only when the brief_outline_templates policy is
+# missing (migration 013 not applied). Deliberately vertical-neutral — the
+# real, shipped outlines live in the policy, because "Our methodology" /
+# "Pricing and engagement models" is one kind of company's voice.
+_FALLBACK_OUTLINE = [
+    "What is {primary_kw}?",
+    "How {primary_kw} works",
+    "Use cases and outcomes",
+    "FAQ",
+]
+
+
 def template_h2_sections(primary_kw: str, stage: str, page_type: str | None) -> list[str]:
-    """Conservative outline skeleton. LLM enhances when available."""
-    if stage == "awareness":
-        return [
-            f"What is {primary_kw}?",
-            f"Why {primary_kw} matters",
-            f"How {primary_kw} works (overview)",
-            "Common use cases",
-            "Key terms and concepts",
-            "Next steps for businesses considering {primary_kw}",
-        ]
-    if stage == "decision":
-        return [
-            f"What our {primary_kw} engagement looks like",
-            "Industries we serve",
-            "Our methodology",
-            "Case studies and proof points",
-            "Pricing and engagement models",
-            "FAQ",
-        ]
-    # consideration default
-    return [
-        f"Our {primary_kw} capabilities",
-        f"How we approach {primary_kw}",
-        "Use cases and outcomes",
-        "Tech stack and integrations",
-        "Industries we serve",
-        "FAQ",
-    ]
+    """
+    Conservative outline skeleton. LLM enhances when available.
+
+    Headings come from the `brief_outline_templates` tenant policy, keyed by
+    audience stage; `consideration` is the fallback for an unknown stage.
+    Interpolation of {primary_kw} stays here so the stored template is plain
+    data rather than a format string the database has to be trusted with.
+    """
+    templates = profile().policy("brief_outline_templates") or {}
+    headings = templates.get(stage) or templates.get("consideration")
+    if not headings:
+        logger.warning(
+            "No brief_outline_templates policy for stage=%r (apply "
+            "sql/013_brief_outline_templates.sql). Using generic skeleton.", stage)
+        headings = _FALLBACK_OUTLINE
+    return [h.replace("{primary_kw}", primary_kw) for h in headings]
 
 
 # ---------------------------------------------------------------------------
@@ -402,8 +407,9 @@ def make_llm_prompt(kw: dict, secondary: list[dict], stage: str,
     ) or "  (no competitor data)"
     secondary_str = ", ".join(s["keyword"] for s in secondary[:6]) or "(none)"
     template_str = "\n".join(f"  - {s}" for s in template_outline)
+    audience = profile().audience_descriptor or "the target buyer"
 
-    return f"""You are writing an SEO content brief for Damco Group (B2B IT services and AI consulting). A writer will use your output verbatim to draft a new page targeting the keyword below. Be specific, opinionated, and grounded in the competitive data shown.
+    return f"""A writer will use your output verbatim to draft a new page targeting the keyword below. Be specific, opinionated, and grounded in the competitive data shown.
 
 PRIMARY KEYWORD: {kw['keyword']!r}
 OFFERING:        {kw.get('offering') or '(unspecified)'}
@@ -418,9 +424,9 @@ PROPOSED OUTLINE SKELETON (you'll refine):
 Produce a JSON object with exactly these fields. Output ONLY the JSON, no preamble or commentary:
 
 {{
-  "intro_hook": "<2-3 sentence opening paragraph that hooks a B2B decision-maker. Use the audience stage to set tone. Mention the primary keyword once, naturally.>",
-  "topic_angle": "<1-2 sentence positioning statement: what unique angle should Damco take vs the competitors listed? Be specific to those competitors.>",
-  "unique_pov": "<3-5 short bullet points (as a JSON array of strings) of differentiators Damco should emphasize that the listed competitors don't. Concrete, not generic.>",
+  "intro_hook": "<2-3 sentence opening paragraph that hooks {audience}. Use the audience stage to set tone. Mention the primary keyword once, naturally.>",
+  "topic_angle": "<1-2 sentence positioning statement: what unique angle should we take vs the competitors listed? Be specific to those competitors.>",
+  "unique_pov": "<3-5 short bullet points (as a JSON array of strings) of differentiators we should emphasize that the listed competitors don't. Concrete, not generic.>",
   "refined_outline": [
     "<H2 heading 1 — refined from the skeleton, more specific and search-friendly>",
     "<H2 heading 2>",
@@ -432,7 +438,7 @@ Produce a JSON object with exactly these fields. Output ONLY the JSON, no preamb
     "...4-6 subtopics..."
   ],
   "questions_to_answer": [
-    "<question 1 — exactly the kind a B2B buyer types into ChatGPT/Perplexity>",
+    "<question 1 — exactly the kind {audience} type into ChatGPT/Perplexity>",
     "<question 2>",
     "...4-6 questions..."
   ]
@@ -461,7 +467,10 @@ def enrich_with_llm(kw: dict, secondary: list[dict], stage: str,
 
     prompt = make_llm_prompt(kw, secondary, stage, template_outline)
     try:
-        text, usage = call_claude(prompt, tier="default", max_tokens=2500, temperature=0.7)
+        text, usage = call_claude(
+            prompt, tier="default", max_tokens=2500, temperature=0.7,
+            system=system_preamble("You are writing an SEO content brief."),
+        )
     except LLMUnavailableError as exc:
         logger.warning("LLM unavailable, using rule-based skeleton: %s", exc)
         return ({
@@ -518,6 +527,9 @@ def enrich_with_llm(kw: dict, secondary: list[dict], stage: str,
 
 # Tokens too generic to be useful for topical matching — they appear in
 # almost every service page on a B2B site, so they're false-positive bait.
+# Vertical-specific: this list is tuned to B2B services vocabulary. A
+# publisher or e-commerce tenant would need a different stopword set, so if a
+# second vertical is onboarded this belongs in tenant_vocabularies.
 GENERIC_MATCH_TOKENS = {
     "services", "service", "solution", "solutions", "company", "companies",
     "consulting", "consultant", "consultants", "partner", "partners",
@@ -533,7 +545,7 @@ GENERIC_MATCH_TOKENS = {
 def suggest_internal_links(primary_kw: str, secondary: list[dict],
                            candidates: list[dict], n: int = 5) -> list[dict]:
     """
-    Pick existing Damco pages most topically related to this brief's
+    Pick existing own-site pages most topically related to this brief's
     primary + secondary keywords. Matching ignores generic tokens
     ("services", "solutions", "company", etc.) so we don't match every
     service page on the site just because they share the word "services".
@@ -588,7 +600,12 @@ def build_brief(kw: dict, allow_llm: bool) -> tuple[dict, dict | None]:
     stage, stage_rationale = classify_audience_stage(kw["keyword"], kw.get("intent"))
 
     target_url_suggestion = suggest_target_url(kw["keyword"], offering)
-    page_type = "service"   # default for B2B service pages; could be inferred per keyword
+    # Every brief is stamped "service". Nothing infers it per keyword, so
+    # concentration_checker's page_type dimension is degenerate: it will
+    # always report 100% concentration on a single type and can never flag a
+    # real imbalance. Left as-is deliberately — changing it changes the
+    # recommended word count and the internal-link ranking too.
+    page_type = "service"
 
     template_outline = template_h2_sections(kw["keyword"], stage, page_type)
     llm_block, usage = enrich_with_llm(kw, secondary, stage, template_outline, allow_llm)
@@ -614,7 +631,7 @@ def build_brief(kw: dict, allow_llm: bool) -> tuple[dict, dict | None]:
             "primary_kw_gsc_position":    float(kw["gsc_position"]) if kw.get("gsc_position") else None,
             "primary_kw_gsc_clicks_14d":  kw.get("gsc_clicks") or 0,
             "primary_kw_gsc_impr_14d":    kw.get("gsc_impressions") or 0,
-            "current_damco_position":    kw.get("damco_position"),
+            "current_own_position":      kw.get("damco_position"),
         },
         "audience": {
             "stage":     stage,
@@ -684,7 +701,8 @@ def write_brief_markdown(brief: dict) -> Path:
                  f"avg position {d['primary_kw_gsc_position'] or '—'}")
     else:
         p.append("- **GSC demand:** (no GSC data yet — this term may be new)")
-    p.append(f"- **Current Damco position:** {d.get('current_damco_position') or 'not in top 100'}")
+    p.append(f"- **Current {profile().brand_name} position:** "
+             f"{d.get('current_own_position') or 'not in top 100'}")
     p.append("")
 
     p.append("## Suggested H1")
@@ -757,7 +775,8 @@ def write_brief_markdown(brief: dict) -> Path:
     p.append("## Internal linking — suggested anchors / target pages")
     p.append("")
     if not brief["internal_links_suggested"]:
-        p.append("_(no related Damco pages found — consider also linking from a relevant pillar after publish)_")
+        p.append(f"_(no related {profile().brand_name} pages found — consider also "
+                 f"linking from a relevant pillar after publish)_")
     else:
         p.append("| Target page | Page type | Anchor suggestion |")
         p.append("|---|---|---|")
@@ -928,9 +947,9 @@ def run(coverage_gap: bool = False,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco SEO Content Brief Generator")
+    parser = argparse.ArgumentParser(description="SEO Content Brief Generator")
     parser.add_argument("--coverage-gap", action="store_true",
-                        help="Auto-pick top coverage-gap keywords (Damco missing from top 100, "
+                        help="Auto-pick top coverage-gap keywords (we're missing from top 100, "
                              "at least 1 tracked competitor in top 10) by GSC impressions.")
     parser.add_argument("--keyword-ids",
                         help="Comma-separated keyword IDs (manual mode)")

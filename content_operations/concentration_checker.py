@@ -74,6 +74,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.database import fetch_all, record_agent_run
+from common.tenant import profile
 
 
 logger = logging.getLogger("concentration_checker")
@@ -227,8 +228,9 @@ def generate_recommendations(analyses: list[dict], briefs: list[dict],
     if aud:
         stages = {b["name"]: b["pct"] for b in aud["buckets"]}
         if stages.get("decision", 0) > 60:
-            recs.append("Pipeline is decision-stage heavy — Damco lacks awareness/consideration content. "
-                        "Add 'what is X', 'X explained' keyword variants and run `glossary_detector`.")
+            recs.append(f"Pipeline is decision-stage heavy — {profile().brand_name} lacks "
+                        "awareness/consideration content. Add 'what is X', 'X explained' "
+                        "keyword variants and run `glossary_detector`.")
         elif stages.get("awareness", 0) > 60:
             recs.append("Pipeline is awareness-stage heavy — light on commercial intent. "
                         "Make sure each awareness page funnels into a decision-stage service page via internal links.")
@@ -417,11 +419,16 @@ def run(days: int = DEFAULT_DAYS,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco Content Calendar Concentration Checker")
+    parser = argparse.ArgumentParser(
+        description=f"{profile().brand_name} Content Calendar Concentration Checker")
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS,
                         help=f"Rolling window in days (default: {DEFAULT_DAYS})")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD_PCT,
-                        help=f"Max % of output for any single bucket (default: {DEFAULT_THRESHOLD_PCT})")
+                        # '%%' — argparse runs help strings through %-formatting,
+                        # so a bare '%' raises 'badly formed help string' before
+                        # the module can do anything. This module had never been
+                        # executed, so the crash had never been seen.
+                        help=f"Max %% of output for any single bucket (default: {DEFAULT_THRESHOLD_PCT})")
     parser.add_argument("--dimension", choices=DIMENSIONS,
                         help="Restrict analysis to one dimension (default: all)")
     parser.add_argument("--dry-run", action="store_true",

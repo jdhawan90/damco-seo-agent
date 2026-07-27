@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 import time
 from datetime import date, timedelta
@@ -51,6 +52,17 @@ AGENT_NAME = "keyword_intelligence.gsc_enrichment"
 
 # GSC data lag — latest available data is typically 3 days old
 GSC_DATA_LAG_DAYS = 3
+
+
+def _contains_phrase(haystack: str, needle: str) -> bool:
+    """
+    True when `haystack` contains `needle` as a whole phrase on word
+    boundaries. Plain `in` would match "crm" inside "scrm" or "crmsoftware".
+    """
+    if not needle or not haystack:
+        return False
+    pattern = r"\b" + r"\s+".join(re.escape(t) for t in needle.split()) + r"\b"
+    return re.search(pattern, haystack) is not None
 
 
 def rank_bucket(position: float | None) -> str:
@@ -127,6 +139,7 @@ def match_and_store(gsc_data: list[dict], lookback_days: int, dry_run: bool = Fa
 
     run_date = date.today()
     matched = 0
+    fuzzy_matched = 0
     not_matched = 0
     stored = 0
 
@@ -136,15 +149,24 @@ def match_and_store(gsc_data: list[dict], lookback_days: int, dry_run: bool = Fa
         gsc_row = gsc_by_query.get(kw_text)
 
         if not gsc_row:
-            # Try contained match — find GSC queries that contain our keyword
-            # Pick the one with highest impressions if multiple match
-            candidates = [
-                r for r in gsc_data
-                if kw_text in r["query"] or r["query"] in kw_text
-            ]
+            # Fall back to long-tail variants: GSC queries that contain the
+            # whole tracked keyword.
+            #
+            # Two things were wrong here. The match was bidirectional, so
+            # `r["query"] in kw_text` let a *broader* GSC query claim a
+            # narrower tracked keyword — tracked "crm for insurance" would
+            # take the metrics for the query "crm". And it was raw substring,
+            # so "crm" also matched "scrm" and "crmsoftware".
+            #
+            # Directional + word-boundary now, and among the survivors take
+            # the *closest* query rather than the highest-impression one:
+            # max(impressions) systematically picked the most generic variant,
+            # which is the opposite of what we want.
+            candidates = [r for r in gsc_data if _contains_phrase(r["query"], kw_text)]
             if candidates:
-                gsc_row = max(candidates, key=lambda r: r["impressions"])
-                logger.debug("Fuzzy match: '%s' → GSC query '%s' (%d impressions)",
+                gsc_row = min(candidates, key=lambda r: (len(r["query"]), -r["impressions"]))
+                fuzzy_matched += 1
+                logger.debug("Long-tail match: '%s' → GSC query '%s' (%d impressions)",
                              kw_text, gsc_row["query"], gsc_row["impressions"])
 
         if gsc_row:
@@ -198,6 +220,7 @@ def match_and_store(gsc_data: list[dict], lookback_days: int, dry_run: bool = Fa
         "total_gsc_queries": len(gsc_data),
         "tracked_keywords": len(kw_map),
         "matched": matched,
+        "fuzzy_matched": fuzzy_matched,
         "not_matched": not_matched,
         "stored": stored,
         "matches": matches,
@@ -244,6 +267,7 @@ def print_summary(stats: dict, lookback_days: int) -> None:
     print(f"  GSC queries returned:    {stats['total_gsc_queries']}")
     print(f"  Tracked keywords:        {stats['tracked_keywords']}")
     print(f"  Matched to GSC data:     {stats['matched']}")
+    print(f"    of which long-tail:    {stats['fuzzy_matched']}")
     print(f"  No GSC data:             {stats['not_matched']}")
     print(f"  Stored in DB:            {stats['stored']}")
     print()

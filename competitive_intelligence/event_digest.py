@@ -18,7 +18,7 @@ What gets included
 - severity in (critical, high, medium) by default; `--all-severity` to
   include low/info noise too.
 - Grouped into sections for fast scanning:
-    1. Damco-side events (we moved)
+    1. Own-side events (we moved)
     2. Competitor entries / exits (top-10 churn)
     3. Position-change events (>=3 positions)
     4. Threat-tier promotions / demotions
@@ -70,6 +70,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.database import fetch_all, record_agent_run
 from common.llm import call_claude, LLMUnavailableError
+from common.tenant import profile, system_preamble
 
 
 logger = logging.getLogger("event_digest")
@@ -82,7 +83,15 @@ SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 INCLUDE_BY_DEFAULT = {"critical", "high", "medium"}
 
-# Event types grouped by section, in display order
+# Event types grouped by section, in display order.
+#
+# DAMCO_EVENT_TYPES holds literal `event_type` values, NOT display text: it is
+# a data contract with keyword_intelligence.rank_tracker, which writes these
+# exact strings into competitor_serp_events.event_type. Renaming them in code
+# without a data migration would orphan the ~85k rows already stored under the
+# old names, so they stay as-is even though they carry the tenant's name.
+# render_other() catches any type not listed here, so an added or renamed type
+# still shows up in the digest rather than vanishing.
 DAMCO_EVENT_TYPES = {
     "damco_drops_top_n", "damco_enters_top_n", "damco_position_change",
 }
@@ -167,7 +176,10 @@ def aggregate_summary(events: list[dict]) -> dict:
 def group_by_section(events: list[dict]) -> dict[str, list[dict]]:
     """Bucket events into report sections."""
     sections = {
-        "damco":      [],
+        # "brand", not "damco" — this is our own side of the SERP, whoever
+        # "our" happens to be. The `damco_*` event_type strings it matches on
+        # cannot be renamed without migrating 84,985 existing rows.
+        "brand":      [],
         "churn":      [],
         "positions":  [],
         "tier":       [],
@@ -176,7 +188,7 @@ def group_by_section(events: list[dict]) -> dict[str, list[dict]]:
     }
     for e in events:
         t = e["event_type"]
-        if t in DAMCO_EVENT_TYPES:        sections["damco"].append(e)
+        if t in DAMCO_EVENT_TYPES:        sections["brand"].append(e)
         elif t in COMPETITOR_CHURN:       sections["churn"].append(e)
         elif t in POSITION_MOVEMENTS:     sections["positions"].append(e)
         elif t in TIER_EVENTS:            sections["tier"].append(e)
@@ -203,7 +215,7 @@ def _fmt_value(v: dict | None) -> str:
 def render_damco_events(events: list[dict]) -> list[str]:
     if not events:
         return []
-    lines = [f"## 🚨 Damco-side movements ({len(events)})", ""]
+    lines = [f"## 🚨 {profile().brand_name}-side movements ({len(events)})", ""]
     lines.append("| Date | Severity | Type | Keyword | Old → New | Delta |")
     lines.append("|---|---|---|---|---|---:|")
     for e in events[:50]:
@@ -335,6 +347,37 @@ def render_features(events: list[dict]) -> list[str]:
     return lines
 
 
+def render_other(events: list[dict]) -> list[str]:
+    """
+    Catch-all for event types no bucket recognises.
+
+    `group_by_section` has always routed unknown types into `sections["other"]`,
+    but nothing rendered it — so those events were counted in the summary
+    totals and then silently vanished from the body. A digest that says
+    "12 critical events" and lists none of them is worse than one that admits
+    it does not recognise the type.
+    """
+    if not events:
+        return []
+    lines = [
+        f"## ❓ Unrecognised event types ({len(events)})",
+        "",
+        "_These events matched no known section. If a producer renamed an "
+        "event type, teach `group_by_section` about it._",
+        "",
+        "| Date | Severity | Keyword | Competitor | Type |",
+        "|---|---|---|---|---|",
+    ]
+    for e in events[:50]:
+        lines.append(f"| {e['event_date']} | {_sev_emoji(e['severity'])} {e['severity']} | "
+                     f"`{e['keyword'] or ''}` | {e.get('competitor_domain') or ''} | "
+                     f"`{e['event_type']}` |")
+    if len(events) > 50:
+        lines.append(f"| … | | | | _{len(events) - 50} more_ |")
+    lines.append("")
+    return lines
+
+
 def render_summary(summary: dict, since: date, since_source: str,
                    offering: str | None) -> list[str]:
     today = date.today().isoformat()
@@ -375,6 +418,79 @@ def render_summary(summary: dict, since: date, since_source: str,
 # LLM editorial summary (optional)
 # ---------------------------------------------------------------------------
 
+def build_competitor_rollup(events: list[dict], since: date) -> list[dict]:
+    """
+    Aggregate the window per competitor, and pull in what that competitor was
+    doing off-SERP in the same period.
+
+    The point of a digest is the correlation: competitor X gained six
+    positions in the same window it published forty new URLs. That is a
+    coordinated push, and it reads completely differently from six unrelated
+    drifts. The data has always existed — `competitor_changes` is populated by
+    two sibling agents — but the narrative prompt only ever saw a flat top-25
+    event list, so the connection was invisible to it.
+    """
+    per: dict[str, dict] = {}
+    for e in events:
+        dom = e.get("competitor_domain")
+        if not dom:
+            continue
+        row = per.setdefault(dom, {
+            "domain": dom, "events": 0, "gained": 0, "lost": 0,
+            "entered": 0, "dropped_out": 0, "keywords": set(),
+            "worst_severity": "info",
+        })
+        row["events"] += 1
+        if e["keyword"]:
+            row["keywords"].add(e["keyword"])
+        t = e["event_type"]
+        if t == "position_gain":
+            row["gained"] += 1
+        elif t == "position_drop":
+            row["lost"] += 1
+        elif t == "new_entrant":
+            row["entered"] += 1
+        elif t == "drop_out":
+            row["dropped_out"] += 1
+        if SEV_ORDER.get(e["severity"], 9) < SEV_ORDER.get(row["worst_severity"], 9):
+            row["worst_severity"] = e["severity"]
+
+    if not per:
+        return []
+
+    # Off-SERP activity in the same window, from the content/page monitors.
+    publishing = {
+        r["competitor_domain"]: r
+        for r in fetch_all(
+            """
+            SELECT c.competitor_domain,
+                   count(*) FILTER (WHERE ch.change_type = 'new_page')       AS new_pages,
+                   count(*) FILTER (WHERE ch.change_type = 'content_update') AS content_updates,
+                   count(*) FILTER (WHERE ch.change_type = 'title_change')   AS title_changes
+              FROM competitor_changes ch
+              JOIN competitors c ON c.id = ch.competitor_id
+             WHERE ch.date_detected >= %s
+             GROUP BY c.competitor_domain
+            """,
+            [since],
+        )
+    }
+
+    out = []
+    for dom, row in per.items():
+        pub = publishing.get(dom, {})
+        out.append({
+            **row,
+            "keywords": sorted(row["keywords"])[:8],
+            "keyword_count": len(row["keywords"]),
+            "new_pages": pub.get("new_pages", 0),
+            "content_updates": pub.get("content_updates", 0),
+            "title_changes": pub.get("title_changes", 0),
+        })
+    out.sort(key=lambda r: (-(r["gained"] + r["entered"]), -r["events"]))
+    return out[:12]
+
+
 def make_narrative_prompt(events: list[dict], summary: dict,
                           since: date, offering: str | None) -> str:
     # Compose a compact bullet list of the top-N events sorted by severity
@@ -388,28 +504,55 @@ def make_narrative_prompt(events: list[dict], summary: dict,
         lines.append(f"  - [{e['severity']}] {e['event_type']} on {e['event_date']}: {kw} {dom} "
                      f"old={old} new={new}")
     body = "\n".join(lines)
+
+    rollup = build_competitor_rollup(events, since)
+    rollup_lines = []
+    for r in rollup:
+        offsite = []
+        if r["new_pages"]:
+            offsite.append(f"{r['new_pages']} new pages")
+        if r["content_updates"]:
+            offsite.append(f"{r['content_updates']} content updates")
+        if r["title_changes"]:
+            offsite.append(f"{r['title_changes']} title rewrites")
+        rollup_lines.append(
+            f"  - {r['domain']}: +{r['gained']} gains, -{r['lost']} drops, "
+            f"{r['entered']} entries, {r['dropped_out']} exits across "
+            f"{r['keyword_count']} keyword(s)"
+            + (f"; same window off-SERP: {', '.join(offsite)}" if offsite else "")
+            + (f"; e.g. {', '.join(repr(k) for k in r['keywords'][:3])}" if r["keywords"] else "")
+        )
+    rollup_body = "\n".join(rollup_lines) or "  (no competitor-attributed events)"
+
     scope = f"offering=`{offering}`" if offering else "all offerings"
-    return f"""You are an SEO strategist briefing Damco's marketing team via a short weekly digest.
+    return f"""Below is a week of tracked SERP events for a short weekly digest.
 
 WINDOW: {since.isoformat()} to {date.today().isoformat()}  ({scope})
 TOTAL EVENTS: {summary['total']}  (critical={summary['by_severity'].get('critical', 0)}, high={summary['by_severity'].get('high', 0)}, medium={summary['by_severity'].get('medium', 0)})
+
+PER-COMPETITOR ROLLUP (SERP movement correlated with their publishing in the same window):
+{rollup_body}
 
 TOP EVENTS:
 {body}
 
 Write the editorial summary that sits at the top of the digest:
-1. A 2-3 sentence "what happened this week" paragraph. Cite specific competitors and keywords where it sharpens the point.
+1. A 2-3 sentence "what happened this week" paragraph. Cite specific competitors and keywords where it sharpens the point. Where the rollup shows a competitor gaining positions AND publishing or rewriting pages in the same window, say so — that is a coordinated push, not drift.
 2. A 3-bullet "what to do about it" list. Concrete actions only — no generic SEO advice. Tag each bullet [URGENT], [THIS WEEK], or [BACKLOG].
 3. One-sentence headline suitable for an email subject.
 
-Be terse. No hedging. End your response when the three sections are done."""
+Use only the figures above. Be terse. No hedging. End your response when the three sections are done."""
 
 
 def get_narrative(events: list[dict], summary: dict, since: date,
                   offering: str | None) -> tuple[str | None, dict | None]:
     prompt = make_narrative_prompt(events, summary, since, offering)
     try:
-        text, usage = call_claude(prompt, tier="default", max_tokens=1500)
+        text, usage = call_claude(
+            prompt, tier="default", max_tokens=1500,
+            system=system_preamble(
+                "You are an SEO strategist briefing the marketing team."),
+        )
         return text, usage
     except LLMUnavailableError as exc:
         logger.warning("LLM narrative unavailable: %s", exc)
@@ -453,11 +596,12 @@ def run(since_arg: str | None = None, offering: str | None = None,
     if not events:
         md_parts.append("_No qualifying events in this window. The system is quiet — or it's time to re-run rank_tracker to gather fresh signal._")
     else:
-        md_parts.extend(render_damco_events(sections["damco"]))
+        md_parts.extend(render_damco_events(sections["brand"]))
         md_parts.extend(render_churn(sections["churn"]))
         md_parts.extend(render_position_moves(sections["positions"]))
         md_parts.extend(render_features(sections["features"]))
         md_parts.extend(render_tier_events(sections["tier"]))
+        md_parts.extend(render_other(sections["other"]))
 
     md_parts.append("")
     md_parts.append("---")
@@ -530,7 +674,7 @@ def run(since_arg: str | None = None, offering: str | None = None,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco SERP Event Digest")
+    parser = argparse.ArgumentParser(description="SERP Event Digest")
     parser.add_argument("--since", help="ISO date (YYYY-MM-DD) lower bound. "
                                         "Default: last successful digest run, or 14 days ago.")
     parser.add_argument("--offering", help="Restrict to one offering")

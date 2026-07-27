@@ -3,12 +3,12 @@ Guest Post Drafter — Phase 3 module of Off-Page & Links
 ========================================================
 
 Drafts a guest post / third-party article for a target publication, on a
-specific topic, with naturally embedded contextual links back to Damco.
+specific topic, with naturally embedded contextual links back to the brand.
 Output is a writeable draft — the editor / sales lead sends it manually
 after review. The agent never publishes.
 
 The prompt is templated from the "SEO Article Prompt Template — Third-Party
-Articles" deliverable (Damco brand style guide). All per-article variables
+Articles" deliverable (tenant brand style guide). All per-article variables
 (blog title, audience, keywords, CTA URL, word count, reference article,
 publishing platform) are parameterized; the FIXED rules from that template
 (writing quality, statistics sourcing, em-dash max, no competitor links,
@@ -44,8 +44,8 @@ Compliance checks (applied to every draft)
   2000-2500 for long-form third-party articles)
 - Brand CTA link count: 1-3 inline anchors to the configured CTA URL
 - Inline anchor text MUST NOT be the bare target keyword
-- Keyword density on primary keyword: 0.5%-2.5%
-- Em dash count: <= 3 (Damco style rule)
+- Keyword density on primary keyword: the profile's keyword_density_band
+- Em dash count: <= the profile's max_em_dashes (brand style rule)
 - Banned phrases (style guide): "guaranteed", "fastest", "best", "#1",
   "game-changer", "cutting-edge", "seamless", "leverage" (verb),
   "in today's [landscape|world|environment]", "ultimately,", etc.
@@ -70,7 +70,7 @@ Usage
         --platform-id 7 \\
         --topic "Agentic AI architecture for insurance underwriting" \\
         --target-keyword "ai agent development" \\
-        --damco-target-url https://www.damcogroup.com/ai-agent-development
+        --brand-target-url https://www.damcogroup.com/ai-agent-development
 
     # Long-form third-party article (2000-2500 words)
     python -m offpage_links.guest_post_drafter --platform-id 7 --brief-id 42 \\
@@ -85,7 +85,7 @@ Usage
 
     # Force rule-based (no LLM cost / when credit unavailable)
     python -m offpage_links.guest_post_drafter --platform-id 7 --topic "..." \\
-        --target-keyword "..." --damco-target-url "..." --no-llm
+        --target-keyword "..." --brand-target-url "..." --no-llm
 
     # Dry run: write file but skip DB writes
     python -m offpage_links.guest_post_drafter --platform-id 7 --brief-id 42 --dry-run
@@ -94,6 +94,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import logging
 import re
@@ -108,6 +109,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from common.connectors.crawler import get_default_crawler
 from common.database import connection, fetch_all, fetch_one, record_agent_run
 from common.llm import LLMUnavailableError, call_claude
+from common.tenant import profile
 
 
 logger = logging.getLogger("guest_post_drafter")
@@ -115,49 +117,79 @@ AGENT_NAME = "offpage_links.guest_post_drafter"
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "outputs" / "outreach" / "guest_posts"
 
-BRAND_NAME              = "Damco Solutions"
-BRAND_CTA_DEFAULT_URL   = "https://www.damcogroup.com/"
-BRAND_CTA_DOMAIN        = "damcogroup.com"
-
-DEFAULT_TARGET_AUDIENCE = "CIOs, CTOs, and IT decision-makers"
-DEFAULT_PERSPECTIVE     = "second-person"   # "you, your" — keep consistent throughout
 DEFAULT_WORD_COUNT_BAND = (800, 1200)
 DEFAULT_CTA_LINK_MIN    = 1
 DEFAULT_CTA_LINK_MAX    = 3
-DEFAULT_MAX_EM_DASHES   = 3
 
-DENSITY_BAND = (0.5, 2.5)             # percent — primary keyword density target band
 
-# Banned promotional / over-claim phrases. Rejected by the style guide.
-BANNED_CLAIM_PATTERNS = [
-    r"\bguaranteed?\b", r"\bfastest\b", r"\bbest(?:-in-class)?\b",
-    r"#\s*1\b", r"\bnumber\s+one\b",
-    r"100%\s+(?:success|reliable|effective|guaranteed)",
-    r"\bgame[-\s]?changer(?:s)?\b", r"\bcutting[-\s]?edge\b",
-    r"\bdisrupt(?:s|ed|ing)?\b", r"\bsynerg(?:y|ies)\b",
-    r"\bseamless(?:ly)?\b", r"\brobust\b",
-    r"\bempower(?:s|ed|ing)?\b",
-    r"\bleverage[sd]?\b",   # banned as a verb; "leverage" as a noun is allowed if it slips through
-    r"\bworld[-\s]?class\b",
-    r"\bin\s+today'?s\s+(?:fast[-\s]?paced|digital|complex|landscape|world|environment)\b",
-]
+# ---------------------------------------------------------------------------
+# Tenant-derived defaults
+#
+# All of these were module constants naming one company. They are resolved
+# lazily — never at import — so that importing this module does not require a
+# database, and so a `TENANT_SLUG` change takes effect without a code change.
+# ---------------------------------------------------------------------------
 
-# Banned default-AI sentence/paragraph openers (style guide).
-BANNED_OPENERS = [
-    r"^\s*it\s+is\s+(?:worth\s+noting|important\s+to\s+(?:note|understand))\s+that",
-    r"^\s*this\s+(?:means|ensures|allows|is\s+where|is\s+why)\b",
-    r"^\s*one\s+of\s+the\s+(?:key|most\s+important)",
-    r"^\s*ultimately,?\s+",
-    r"^\s*essentially,?\s+",
-    r"^\s*fundamentally,?\s+",
-    r"^\s*by\s+doing\s+so,?\s+",
-    r"^\s*as\s+a\s+result,?\s+",
-    r"^\s*let'?s\s+(?:explore|take\s+a\s+look\s+at|dive)",
-    r"^\s*in\s+conclusion,?\s+",
-    r"^\s*in\s+order\s+to\b",
-    r"^\s*for\s+the\s+purpose\s+of\b",
-    r"^\s*as\s+mentioned\s+(?:above|earlier|previously)\b",
-]
+def content_style() -> dict:
+    """The tenant's content_style policy, with the shipped defaults as backstop."""
+    return profile().policy("content_style", {}) or {}
+
+
+def default_perspective() -> str:
+    """e.g. "second-person" — "you, your", kept consistent throughout."""
+    return content_style().get("perspective") or "second-person"
+
+
+def default_max_em_dashes() -> int:
+    return int(content_style().get("max_em_dashes", 3))
+
+
+def density_band() -> tuple[float, float]:
+    """Percent — primary keyword density target band."""
+    band = content_style().get("keyword_density_band") or [0.5, 2.5]
+    return float(band[0]), float(band[1])
+
+
+def grammar_standard() -> str:
+    """The one-line grammar instruction, e.g. "US English. Chicago Manual of Style."."""
+    style = content_style()
+    return (f"{style.get('english') or 'US'} English. "
+            f"{style.get('style_guide') or 'Chicago Manual of Style'}.")
+
+
+def analyst_sources() -> tuple[str, ...]:
+    """Primary research houses acceptable as statistic sources, sorted."""
+    return tuple(sorted(profile().vocab("analyst_sources")))
+
+
+def _compile_vocab_patterns(kind: str) -> tuple[re.Pattern, ...]:
+    """
+    Compile the regex source strings stored in the tenant vocabulary `kind`.
+
+    A malformed pattern is a data problem in one row, not a reason to lose a
+    paid LLM call: log it and drop that single rule. Sorted for a stable
+    reporting order.
+    """
+    compiled: list[re.Pattern] = []
+    for source in sorted(profile().vocab(kind)):
+        try:
+            compiled.append(re.compile(source, re.IGNORECASE))
+        except re.error as exc:
+            logger.error("Ignoring invalid %s pattern %r from the tenant profile: %s",
+                         kind, source, exc)
+    return tuple(compiled)
+
+
+@functools.lru_cache(maxsize=1)
+def banned_claim_patterns() -> tuple[re.Pattern, ...]:
+    """Banned promotional / over-claim phrases. Rejected by the style guide."""
+    return _compile_vocab_patterns("banned_claims")
+
+
+@functools.lru_cache(maxsize=1)
+def banned_openers() -> tuple[re.Pattern, ...]:
+    """Banned default-AI sentence/paragraph openers (style guide)."""
+    return _compile_vocab_patterns("banned_openers")
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +231,7 @@ def crawl_platform_context(platform_url: str) -> dict:
 
 
 def resolve_from_brief(brief: dict) -> tuple[str, str, str]:
-    """Returns (topic, target_keyword, damco_target_url)."""
+    """Returns (topic, target_keyword, brand_target_url)."""
     bc = brief.get("brief_content") or {}
     if isinstance(bc, str):
         try:
@@ -265,6 +297,11 @@ def make_guest_post_prompt(platform: dict, context: dict, *,
 
     target_word = (word_count_band[0] + word_count_band[1]) // 2
 
+    # Style rules and the acceptable-source list come from the tenant profile.
+    sources = analyst_sources()
+    source_list = ", ".join(sources) if sources else "recognised research houses"
+    source_example = ", ".join(f"'{s}'" for s in sources[:2]) or "'the research house'"
+
     return f"""Draft a third-party / guest article for the publication below.
 
 ================================================================================
@@ -288,7 +325,7 @@ Topic / angle:       {topic}
 Brand voice:         Optimistic, simple, inspirational. Upbeat and resourceful —
                      not boastful. Acknowledge the challenge, then focus on the
                      solution. No over-promising.
-Grammar standard:    US English. Chicago Manual of Style.
+Grammar standard:    {grammar_standard()}
 Em dash rule:        Use em dashes sparingly. Maximum {max_em_dashes} per article.
                      If a comma or a restructured sentence works equally well,
                      prefer that instead.
@@ -333,7 +370,7 @@ body text.
 - Use only recent statistics from 2025 or 2026 where available. Older data is
   allowed only if no recent equivalent exists from a credible source.
 - Source all statistics from PRIMARY sources only: the brand's own published
-  data, IBM, Gartner, McKinsey, Forrester, IDC, government bodies, or
+  data, {source_list}, government bodies, or
   peer-reviewed research. NO listicle blogs, NO SEO content sites.
 - Hyperlink every statistic inline to its source page. Provide the URL in the
   output JSON. Do not include publication years inline in the article body —
@@ -473,7 +510,7 @@ Return a single JSON object with EXACTLY these fields:
     {{
       "claim":     "<the exact sentence in the body that this statistic supports>",
       "stat":      "<the statistic itself, no publication year inline>",
-      "source":    "<primary source name, e.g. 'Gartner', 'IBM Institute for Business Value'>",
+      "source":    "<primary source name, e.g. {source_example}>",
       "url":       "<real, live source URL>",
       "year":      "<publication year — kept here for the sources list, not inline>"
     }}
@@ -484,7 +521,7 @@ Return a single JSON object with EXACTLY these fields:
   "image_cues": [
     "<one functional image / SVG infographic idea per entry; 2-4 entries>"
   ],
-  "author_bio": "<50-80 word author bio for {brand_name}. May include one additional link to {BRAND_CTA_DEFAULT_URL} if natural.>"
+  "author_bio": "<50-80 word author bio for {brand_name}. May include one additional link to {brand_cta_url} if natural.>"
 }}
 
 Across all sections, the keyword frequency table must reflect the actual final
@@ -495,6 +532,7 @@ def fallback_template(brand_name: str, brand_cta_url: str, topic: str,
                        primary_keyword: str, blog_title: str) -> dict:
     """Structural skeleton when LLM unavailable. Mirrors the JSON shape the
     prompt requests so downstream code paths stay uniform."""
+    source_hint = "[" + " / ".join(analyst_sources() or ("primary source",)) + "]"
     return {
         "title":    blog_title or f"[FILL: title featuring '{primary_keyword}']",
         "subtitle": "[FILL: one-sentence summary of the angle]",
@@ -535,10 +573,10 @@ def fallback_template(brand_name: str, brand_cta_url: str, topic: str,
         ),
         "external_citations": [
             {"claim": "[FILL: cited claim 1]", "stat": "[FILL]",
-             "source": "[Gartner / IBM / McKinsey / Forrester / IDC]",
+             "source": source_hint,
              "url": "[FILL: source URL 1]", "year": "[FILL]"},
             {"claim": "[FILL: cited claim 2]", "stat": "[FILL]",
-             "source": "[Gartner / IBM / McKinsey / Forrester / IDC]",
+             "source": source_hint,
              "url": "[FILL: source URL 2]", "year": "[FILL]"},
         ],
         "keyword_frequency": [
@@ -550,7 +588,7 @@ def fallback_template(brand_name: str, brand_cta_url: str, topic: str,
         ],
         "author_bio": (
             f"[FILL: 50-80 word author bio for {brand_name}. May include one "
-            f"additional link to {BRAND_CTA_DEFAULT_URL} if natural.]"
+            f"additional link to {brand_cta_url} if natural.]"
         ),
         "_source": "rule-based (LLM not used or unavailable)",
     }
@@ -571,11 +609,23 @@ def generate_guest_post(platform: dict, context: dict, *,
                         cta_link_min: int,
                         cta_link_max: int,
                         allow_llm: bool,
-                        max_output_tokens: int = 8000) -> tuple[dict, dict | None]:
-    """Build the prompt, call Claude, parse JSON. Falls back to skeleton on
-    any failure. Returns (draft_dict, usage_dict_or_None)."""
+                        max_output_tokens: int | None = None) -> tuple[dict, dict | None]:
+    """
+    Build the prompt, call Claude, parse JSON. Falls back to skeleton on any
+    failure. Returns (draft_dict, usage_dict_or_None).
+
+    A degraded result carries `_degraded` — a human-readable reason. Callers
+    MUST check it. A skeleton full of `[FILL: ...]` markers that reports itself
+    as a finished draft is worse than an error, because the failure is only
+    visible to someone who opens the file.
+    """
     if not allow_llm:
-        return fallback_template(brand_name, brand_cta_url, topic, primary_keyword, blog_title), None
+        skeleton = fallback_template(brand_name, brand_cta_url, topic, primary_keyword, blog_title)
+        skeleton["_degraded"] = "LLM disabled via --no-llm — this is a skeleton, not a draft"
+        return skeleton, None
+
+    if max_output_tokens is None:
+        max_output_tokens = output_token_budget(word_count_band)
 
     system_prompt = make_system_prompt(brand_name)
     user_prompt = make_guest_post_prompt(
@@ -592,9 +642,18 @@ def generate_guest_post(platform: dict, context: dict, *,
                                    max_tokens=max_output_tokens, temperature=0.7)
     except LLMUnavailableError as exc:
         logger.warning("LLM unavailable, using rule-based skeleton: %s", exc)
-        return fallback_template(brand_name, brand_cta_url, topic, primary_keyword, blog_title), None
+        skeleton = fallback_template(brand_name, brand_cta_url, topic, primary_keyword, blog_title)
+        skeleton["_degraded"] = f"LLM unavailable ({exc}) — this is a skeleton, not a draft"
+        return skeleton, None
+
+    # Truncation is the failure mode that used to masquerade as success: the
+    # model hits the output ceiling mid-JSON, the parse fails, and the skeleton
+    # goes out the door labelled complete. Detect it explicitly so the reason
+    # in the log is the real one.
+    truncated = bool(usage and usage.get("output_tokens", 0) >= max_output_tokens - 16)
 
     block: dict = {}
+    parse_error: str | None = None
     try:
         cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip())
         cleaned = re.sub(r"\s*```\s*$", "", cleaned)
@@ -602,14 +661,34 @@ def generate_guest_post(platform: dict, context: dict, *,
         last = cleaned.rfind("}")
         if first >= 0 and last > first:
             block = json.loads(cleaned[first:last + 1])
+        else:
+            parse_error = "no JSON object found in the response"
     except (json.JSONDecodeError, ValueError) as exc:
-        logger.warning("Failed to parse LLM JSON: %s", exc)
+        parse_error = str(exc)
 
     if not block.get("title") or not block.get("sections"):
+        if truncated:
+            reason = (
+                f"LLM response hit the {max_output_tokens}-token output ceiling and "
+                f"was cut off mid-JSON — raise the budget or narrow the word band"
+            )
+        elif parse_error:
+            reason = f"LLM returned unparseable JSON ({parse_error})"
+        else:
+            reason = "LLM response was missing 'title' or 'sections'"
+        logger.error("%s — falling back to skeleton", reason)
         fallback = fallback_template(brand_name, brand_cta_url, topic, primary_keyword, blog_title)
-        fallback["_source"] = "rule-based (LLM JSON parse failed)"
+        fallback["_source"] = f"rule-based ({reason})"
+        fallback["_degraded"] = reason
         fallback["_llm_raw_first_500"] = text[:500]
         return fallback, usage
+
+    if truncated:
+        logger.warning(
+            "LLM output reached the %d-token ceiling but the JSON still parsed — "
+            "trailing fields (author_bio, citations) may be missing",
+            max_output_tokens,
+        )
 
     # Normalize sections shape (tolerate missing optional fields)
     fixed_sections = []
@@ -716,6 +795,24 @@ def collect_full_text(draft: dict) -> str:
     return " \n\n ".join(chunks)
 
 
+def output_token_budget(word_count_band: tuple[int, int]) -> int:
+    """
+    Output-token ceiling for one article.
+
+    The flat 8000 default was too tight: a 2,500-word article is ~3,400 tokens
+    of prose, but it ships inside a JSON envelope carrying sections, H3
+    subsections, lists, citations, a keyword table, image cues and a bio —
+    plus escaping. That comfortably cleared 8000 and truncated mid-object.
+
+    Budget ~4 tokens per word (prose plus the envelope carrying it) with a
+    generous floor. Headroom is free — you are billed for tokens actually
+    generated, not for the ceiling — whereas truncation costs a whole paid
+    call and returns a placeholder.
+    """
+    _, band_max = word_count_band
+    return max(16000, int(band_max * 4) + 4000)
+
+
 def count_keyword_in_text(text: str, keyword: str) -> int:
     if not keyword or not text:
         return 0
@@ -756,9 +853,10 @@ def count_em_dashes(text: str) -> int:
 def find_banned_openers(text: str) -> list[str]:
     """Return a list of human-readable opener-pattern hits across paragraphs."""
     hits: list[str] = []
+    patterns = banned_openers()
     for para in re.split(r"\n\s*\n", text or ""):
-        for pat in BANNED_OPENERS:
-            if re.match(pat, para, re.IGNORECASE):
+        for pat in patterns:
+            if pat.match(para):
                 hits.append(re.sub(r"\s+", " ", para[:80]).strip())
                 break
     return hits
@@ -768,7 +866,10 @@ def run_compliance(draft: dict, primary_keyword: str, brand_cta_url: str, *,
                     word_count_band: tuple[int, int] = DEFAULT_WORD_COUNT_BAND,
                     cta_link_min: int = DEFAULT_CTA_LINK_MIN,
                     cta_link_max: int = DEFAULT_CTA_LINK_MAX,
-                    max_em_dashes: int = DEFAULT_MAX_EM_DASHES) -> dict:
+                    max_em_dashes: int | None = None) -> dict:
+    if max_em_dashes is None:
+        max_em_dashes = default_max_em_dashes()
+    density_min, density_max = density_band()
     issues: list[dict] = []
     full_text = collect_full_text(draft)
     wc = len(full_text.split())
@@ -787,17 +888,17 @@ def run_compliance(draft: dict, primary_keyword: str, brand_cta_url: str, *,
         occurrences = count_keyword_in_text(full_text, primary_keyword)
         kw_words = len(primary_keyword.split())
         density = (100.0 * occurrences * kw_words / wc) if wc else 0
-        if not (DENSITY_BAND[0] <= density <= DENSITY_BAND[1]):
-            sev = "fail" if (density == 0 or density > DENSITY_BAND[1] * 1.5) else "warn"
+        if not (density_min <= density <= density_max):
+            sev = "fail" if (density == 0 or density > density_max * 1.5) else "warn"
             issues.append({
                 "severity": sev, "kind": "keyword_density",
                 "detail":   f"Density {density:.2f}% on '{primary_keyword}' "
-                            f"(target {DENSITY_BAND[0]}-{DENSITY_BAND[1]}%, "
+                            f"(target {density_min}-{density_max}%, "
                             f"{occurrences} occurrence(s)).",
             })
 
     # 3. Brand CTA link count (band, not exact)
-    cta_links = count_brand_cta_links(draft, brand_cta_url, BRAND_CTA_DOMAIN)
+    cta_links = count_brand_cta_links(draft, brand_cta_url, profile().primary_domain)
     if cta_links == 0:
         issues.append({"severity": "fail", "kind": "missing_cta_link",
                        "detail": f"No link to the brand CTA URL ({brand_cta_url}) found anywhere."})
@@ -832,11 +933,11 @@ def run_compliance(draft: dict, primary_keyword: str, brand_cta_url: str, *,
         })
 
     # 6. Banned claim / cliché / buzzword phrases
-    for pat in BANNED_CLAIM_PATTERNS:
-        if re.search(pat, full_text, re.IGNORECASE):
+    for pat in banned_claim_patterns():
+        if pat.search(full_text):
             issues.append({
                 "severity": "warn", "kind": "claim_phrase",
-                "detail":   f"Body contains banned phrase matching /{pat}/.",
+                "detail":   f"Body contains banned phrase matching /{pat.pattern}/.",
             })
 
     # 7. Default AI openers
@@ -909,6 +1010,33 @@ def write_guest_post(platform: dict, topic: str, target_keyword: str,
     p.append(f"**Sections:** {compliance['sections']}  ")
     p.append("")
 
+    # Degradation banner — first thing a reader sees, above compliance, because
+    # a clean compliance scan on a skeleton is meaningless and actively
+    # misleading. The raw LLM fragment is captured here too; it used to be
+    # collected and then thrown away, leaving nothing to diagnose.
+    degraded = draft.get("_degraded")
+    if degraded:
+        p.append("## ❌ NOT A USABLE DRAFT")
+        p.append("")
+        p.append(f"**{degraded}**")
+        p.append("")
+        p.append("Everything below is a rule-based skeleton with `[FILL: ...]` "
+                 "placeholders. It is not publishable and the compliance scan "
+                 "below is measuring the skeleton, not an article.")
+        p.append("")
+        raw = draft.get("_llm_raw_first_500")
+        if raw:
+            p.append("<details><summary>First 500 chars of the raw LLM response</summary>")
+            p.append("")
+            p.append("```")
+            p.append(raw)
+            p.append("```")
+            p.append("")
+            p.append("</details>")
+            p.append("")
+        p.append("---")
+        p.append("")
+
     # Compliance flags inline (top of file)
     if compliance["issues"]:
         p.append("## ⚠️ Compliance flags  (review before sending)")
@@ -944,9 +1072,13 @@ def write_guest_post(platform: dict, topic: str, target_keyword: str,
         if cta.get("present") and cta.get("anchor") and cta.get("url"):
             anchor = cta["anchor"]
             if anchor.lower() in body.lower():
+                # The replacement must be escaped too. An LLM-written anchor
+                # containing a backslash would otherwise be read as a regex
+                # escape — `\g` raises re.error, and a bare `\` silently
+                # corrupts the output.
                 body = re.sub(
                     re.escape(anchor),
-                    f"[{anchor}]({cta['url']})",
+                    lambda m: f"[{m.group(0)}]({cta['url']})",
                     body, count=1, flags=re.IGNORECASE,
                 )
             else:
@@ -991,17 +1123,30 @@ def write_guest_post(platform: dict, topic: str, target_keyword: str,
         p.append(draft["author_bio"])
         p.append("")
 
-    # Keyword frequency table
+    # Keyword frequency table.
+    #
+    # The model is asked for these counts in the prompt, but LLMs cannot count
+    # tokens reliably and this table is what a human reviews before publishing.
+    # Recount every row against the assembled text with count_keyword_in_text()
+    # and show the model's claim only where the two disagree.
     kw_freq = draft.get("keyword_frequency") or []
     if kw_freq:
+        body_text = collect_full_text(draft)
         p.append("---")
         p.append("")
         p.append("### Keyword frequency")
         p.append("")
-        p.append("| Keyword | Frequency |")
-        p.append("|---|---:|")
+        p.append("| Keyword | Actual | LLM claimed |")
+        p.append("|---|---:|---:|")
         for k in kw_freq:
-            p.append(f"| `{k.get('keyword', '')}` | {k.get('frequency', 0)} |")
+            kw = k.get("keyword", "")
+            actual = count_keyword_in_text(body_text, kw)
+            claimed = k.get("frequency", 0)
+            note = f"{claimed}" if claimed == actual else f"{claimed} ⚠"
+            p.append(f"| `{kw}` | {actual} | {note} |")
+        p.append("")
+        p.append("_Actual counts are measured from the draft text. "
+                 "⚠ marks a keyword the model miscounted._")
         p.append("")
 
     # Sources list (for internal reference; publication years kept here)
@@ -1037,7 +1182,7 @@ def write_guest_post(platform: dict, topic: str, target_keyword: str,
 
 def log_guest_post_activity(platform: dict, file_path: Path,
                              topic: str, target_keyword: str,
-                             damco_target_url: str) -> int:
+                             brand_target_url: str) -> int:
     sql = """
         INSERT INTO offpage_activities
             (executive, activity_type, target_page_id, platform_id, platform,
@@ -1045,10 +1190,10 @@ def log_guest_post_activity(platform: dict, file_path: Path,
         VALUES (NULL, 'guest_post', %s, %s, %s, 'draft', CURRENT_DATE, NULL, %s)
         RETURNING id
     """
-    # Try to attach to a pages row matching damco_target_url
+    # Try to attach to a pages row matching brand_target_url
     target_page_id = None
-    if damco_target_url:
-        row = fetch_one("SELECT id FROM pages WHERE url = %s", [damco_target_url])
+    if brand_target_url:
+        row = fetch_one("SELECT id FROM pages WHERE url = %s", [brand_target_url])
         if row:
             target_page_id = row["id"]
 
@@ -1071,22 +1216,31 @@ def log_guest_post_activity(platform: dict, file_path: Path,
 def run(platform_id: int,
         topic: str | None = None,
         target_keyword: str | None = None,
-        damco_target_url: str | None = None,
+        brand_target_url: str | None = None,
         brief_id: int | None = None,
         blog_title: str | None = None,
         secondary_keywords: list[str] | None = None,
-        target_audience: str = DEFAULT_TARGET_AUDIENCE,
-        brand_name: str = BRAND_NAME,
+        target_audience: str | None = None,
+        brand_name: str | None = None,
         word_count_band: tuple[int, int] = DEFAULT_WORD_COUNT_BAND,
-        perspective: str = DEFAULT_PERSPECTIVE,
+        perspective: str | None = None,
         reference_url: str | None = None,
-        max_em_dashes: int = DEFAULT_MAX_EM_DASHES,
+        max_em_dashes: int | None = None,
         cta_link_min: int = DEFAULT_CTA_LINK_MIN,
         cta_link_max: int = DEFAULT_CTA_LINK_MAX,
         no_crawl: bool = False,
         allow_llm: bool = True,
         dry_run: bool = False) -> dict:
     start = time.monotonic()
+
+    # Tenant-derived defaults resolve here, not in the signature — a default
+    # evaluated at import would hit the database on `import`.
+    p = profile()
+    target_audience = target_audience or p.audience_descriptor or ""
+    brand_name = brand_name or p.brand_name
+    perspective = perspective or default_perspective()
+    if max_em_dashes is None:
+        max_em_dashes = default_max_em_dashes()
 
     platform = load_platform(platform_id)
     if not platform:
@@ -1106,7 +1260,7 @@ def run(platform_id: int,
         b_topic, b_kw, b_url = resolve_from_brief(brief)
         topic = topic or b_topic
         target_keyword = target_keyword or b_kw
-        damco_target_url = damco_target_url or b_url
+        brand_target_url = brand_target_url or b_url
         # If brief has secondary keywords + the caller didn't override, use them
         if not secondary_keywords:
             bc = brief.get("brief_content") or {}
@@ -1120,14 +1274,18 @@ def run(platform_id: int,
             secondary_keywords = [s.get("keyword") if isinstance(s, dict) else str(s)
                                   for s in sec if s]
 
-    if not topic or not target_keyword or not damco_target_url:
-        logger.error("Need --topic, --target-keyword, and --damco-target-url "
+    if not topic or not target_keyword or not brand_target_url:
+        logger.error("Need --topic, --target-keyword, and --brand-target-url "
                      "(or --brief-id to derive them).")
         return {"status": "error", "reason": "incomplete inputs"}
 
-    if not damco_target_url.startswith(("http://", "https://")):
-        damco_target_url = BRAND_CTA_DEFAULT_URL.rstrip("/") + (
-            damco_target_url if damco_target_url.startswith("/") else f"/{damco_target_url}"
+    # A relative target resolves against the tenant's own CTA URL. It used to
+    # resolve against a hardcoded constant, which pointed every tenant's drafts
+    # at the same company's site.
+    if not brand_target_url.startswith(("http://", "https://")):
+        base = (p.cta_url or f"https://{p.primary_domain}/").rstrip("/")
+        brand_target_url = base + (
+            brand_target_url if brand_target_url.startswith("/") else f"/{brand_target_url}"
         )
 
     secondary_keywords = secondary_keywords or []
@@ -1139,14 +1297,14 @@ def run(platform_id: int,
         platform, context,
         topic=topic, blog_title=blog_title, primary_keyword=target_keyword,
         secondary_keywords=secondary_keywords, target_audience=target_audience,
-        brand_name=brand_name, brand_cta_url=damco_target_url,
+        brand_name=brand_name, brand_cta_url=brand_target_url,
         word_count_band=word_count_band, perspective=perspective,
         reference_url=reference_url, max_em_dashes=max_em_dashes,
         cta_link_min=cta_link_min, cta_link_max=cta_link_max,
         allow_llm=allow_llm,
     )
     compliance = run_compliance(
-        draft, target_keyword, damco_target_url,
+        draft, target_keyword, brand_target_url,
         word_count_band=word_count_band,
         cta_link_min=cta_link_min, cta_link_max=cta_link_max,
         max_em_dashes=max_em_dashes,
@@ -1157,16 +1315,30 @@ def run(platform_id: int,
     activity_id: int | None = None
     if not dry_run:
         activity_id = log_guest_post_activity(
-            platform, file_path, topic, target_keyword, damco_target_url
+            platform, file_path, topic, target_keyword, brand_target_url
         )
+
+    # A skeleton is not a draft. If generation degraded, the run is not a
+    # success no matter how clean the compliance scan looks — a document full
+    # of [FILL: ...] markers trivially passes checks it was never subject to.
+    degraded = draft.get("_degraded")
+    if degraded:
+        run_status = "failed"
+        run_errors = [f"degraded output: {degraded}"]
+    elif compliance["fail_count"] > 0:
+        run_status = "partial"
+        run_errors = [i["detail"] for i in compliance["issues"] if i["severity"] == "fail"][:5]
+    else:
+        run_status = "success"
+        run_errors = []
 
     duration = time.monotonic() - start
     if not dry_run:
         record_agent_run(
             agent_name=AGENT_NAME,
-            status="success" if compliance["fail_count"] == 0 else "partial",
-            records_processed=1,
-            errors=[i["detail"] for i in compliance["issues"] if i["severity"] == "fail"][:5],
+            status=run_status,
+            records_processed=0 if degraded else 1,
+            errors=run_errors,
             duration_seconds=round(duration, 2),
             metadata={
                 "platform_id":        platform_id,
@@ -1177,7 +1349,7 @@ def run(platform_id: int,
                 "blog_title":         blog_title,
                 "target_keyword":     target_keyword,
                 "secondary_keywords": secondary_keywords,
-                "damco_target_url":   damco_target_url,
+                "brand_target_url":   brand_target_url,
                 "word_count_band":    list(word_count_band),
                 "target_audience":    target_audience,
                 "perspective":        perspective,
@@ -1199,12 +1371,17 @@ def run(platform_id: int,
     print(f"   GUEST POST / 3RD-PARTY DRAFTER -- {date.today().isoformat()}")
     print(f"  {'=' * 72}")
     print()
+    if degraded:
+        print(f"  *** NOT A USABLE DRAFT ***")
+        print(f"  {degraded}")
+        print(f"  The file below is a [FILL: ...] skeleton. Do not send it.")
+        print()
     print(f"  Platform:        {platform['platform_url']}")
     print(f"  Blog title:      {blog_title[:90]}")
     print(f"  Topic:           {topic[:90]}")
     print(f"  Target kw:       {target_keyword}")
     print(f"  Secondary kw:    {', '.join(secondary_keywords)[:90] if secondary_keywords else '(none)'}")
-    print(f"  Brand CTA URL:   {damco_target_url}")
+    print(f"  Brand CTA URL:   {brand_target_url}")
     print(f"  Audience:        {target_audience}")
     print(f"  Word band:       {word_count_band[0]}-{word_count_band[1]}")
     print(f"  LLM:             {'on' if usage else 'off / unavailable'}")
@@ -1217,6 +1394,7 @@ def run(platform_id: int,
     if activity_id:
         print(f"  Activity row:    offpage_activities.id = {activity_id}")
     print(f"  Draft file:      {file_path}")
+    print(f"  Run status:      {run_status}")
     print(f"  Duration:        {duration:.2f}s")
     if compliance["issues"]:
         print()
@@ -1241,7 +1419,13 @@ def run(platform_id: int,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco Guest Post / Third-Party Article Drafter")
+    p = profile()
+    default_audience = p.audience_descriptor or ""
+    perspective_default = default_perspective()
+    em_dash_default = default_max_em_dashes()
+
+    parser = argparse.ArgumentParser(
+        description=f"{p.brand_name} Guest Post / Third-Party Article Drafter")
     parser.add_argument("--platform-id", type=int, required=True,
                         help="platform_targets.id of the publication")
     parser.add_argument("--topic",
@@ -1252,24 +1436,28 @@ def main() -> None:
                         help="Primary search keyword the post should rank for")
     parser.add_argument("--secondary-keywords",
                         help="Comma-separated list of secondary keywords")
-    parser.add_argument("--damco-target-url",
-                        help="Brand CTA URL — Damco page to link to from the post")
+    parser.add_argument("--brand-target-url", dest="brand_target_url",
+                        help="Brand CTA URL — our own page to link to from the post")
+    # Pre-rename spelling. Hidden from --help but still honoured, so scripts
+    # written against the old flag keep working.
+    parser.add_argument("--damco-target-url", dest="brand_target_url",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--brief-id", type=int,
                         help="content_briefs.id — derive topic / primary_kw / secondary_kw / target_url from this brief")
-    parser.add_argument("--target-audience", default=DEFAULT_TARGET_AUDIENCE,
-                        help=f"Target audience description (default: {DEFAULT_TARGET_AUDIENCE!r})")
-    parser.add_argument("--brand-name", default=BRAND_NAME,
-                        help=f"Brand name (default: {BRAND_NAME!r})")
+    parser.add_argument("--target-audience", default=default_audience,
+                        help=f"Target audience description (default: {default_audience!r})")
+    parser.add_argument("--brand-name", default=p.brand_name,
+                        help=f"Brand name (default: {p.brand_name!r})")
     parser.add_argument("--word-count-min", type=int, default=DEFAULT_WORD_COUNT_BAND[0],
                         help=f"Minimum body word count (default: {DEFAULT_WORD_COUNT_BAND[0]})")
     parser.add_argument("--word-count-max", type=int, default=DEFAULT_WORD_COUNT_BAND[1],
                         help=f"Maximum body word count (default: {DEFAULT_WORD_COUNT_BAND[1]})")
-    parser.add_argument("--perspective", default=DEFAULT_PERSPECTIVE,
-                        help=f"Narrative perspective (default: {DEFAULT_PERSPECTIVE!r})")
+    parser.add_argument("--perspective", default=perspective_default,
+                        help=f"Narrative perspective (default: {perspective_default!r})")
     parser.add_argument("--reference-url",
                         help="Reference article URL to read before drafting (drives content-gap research)")
-    parser.add_argument("--max-em-dashes", type=int, default=DEFAULT_MAX_EM_DASHES,
-                        help=f"Max em dashes allowed in body (default: {DEFAULT_MAX_EM_DASHES})")
+    parser.add_argument("--max-em-dashes", type=int, default=em_dash_default,
+                        help=f"Max em dashes allowed in body (default: {em_dash_default})")
     parser.add_argument("--cta-link-min", type=int, default=DEFAULT_CTA_LINK_MIN,
                         help=f"Min brand CTA links in body (default: {DEFAULT_CTA_LINK_MIN})")
     parser.add_argument("--cta-link-max", type=int, default=DEFAULT_CTA_LINK_MAX,
@@ -1299,7 +1487,7 @@ def main() -> None:
         platform_id=args.platform_id,
         topic=args.topic,
         target_keyword=args.target_keyword,
-        damco_target_url=args.damco_target_url,
+        brand_target_url=args.brand_target_url,
         brief_id=args.brief_id,
         blog_title=args.blog_title,
         secondary_keywords=secondary_kws or None,

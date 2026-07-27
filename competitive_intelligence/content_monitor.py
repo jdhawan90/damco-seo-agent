@@ -72,6 +72,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.database import connection, fetch_all, record_agent_run
 from common.sitemap import discover_sitemap_urls, collect_urls_from_sitemap
+from common.tenant import profile
 
 
 logger = logging.getLogger("content_monitor")
@@ -214,10 +215,12 @@ def process_competitor(competitor: dict, keyword_pattern: re.Pattern | None,
     counters["new_urls"] = len(new_urls)
 
     if dry_run:
-        # Still report whether the new URLs would match a Damco keyword
+        # Still report whether the new URLs would match a tracked keyword
         if keyword_pattern:
             counters["matched_keywords"] = sum(1 for u in new_urls if keyword_pattern.search(u.lower()))
         return counters
+
+    brand = profile().brand_name
 
     with connection() as conn:
         cur = conn.cursor()
@@ -242,8 +245,12 @@ def process_competitor(competitor: dict, keyword_pattern: re.Pattern | None,
             if keyword_match:
                 counters["matched_keywords"] += 1
                 sig = KEYWORD_PATH_BOOST_SIGNIFICANCE
+                # Note: this text is persisted to competitor_changes.diff_summary.
+                # Rows written before the tenant profile landed keep the old
+                # literal brand name; they are not migrated.
                 detail = (f"New URL in sitemap: {url} "
-                          f"(path token '{keyword_match.group(0)}' matches a Damco-tracked keyword)")
+                          f"(path token '{keyword_match.group(0)}' matches a "
+                          f"{brand}-tracked keyword)")
             else:
                 sig = BASE_NEW_PAGE_SIGNIFICANCE
                 detail = f"New URL in sitemap: {url}"
@@ -312,7 +319,7 @@ def write_markdown(per_competitor: list[dict]) -> Path:
     parts.append(f"| Competitors with sitemap | {sum(1 for c in per_competitor if c['sitemap_found'])} |")
     parts.append(f"| Competitors w/o sitemap | {sum(1 for c in per_competitor if not c['sitemap_found'])} |")
     parts.append(f"| Total new URLs discovered | {total_new} |")
-    parts.append(f"| New URLs matching Damco keywords | {total_kw} |")
+    parts.append(f"| New URLs matching {profile().brand_name} keywords | {total_kw} |")
     parts.append(f"| `new_page` events emitted | {total_events} |")
     parts.append("")
 
@@ -346,7 +353,7 @@ def write_markdown(per_competitor: list[dict]) -> Path:
             if not rows:
                 continue
             parts.append(f"### `{c['competitor_domain']}` ({c['new_urls']} new URLs, "
-                         f"{c['matched_keywords']} match Damco keywords)")
+                         f"{c['matched_keywords']} match {profile().brand_name} keywords)")
             for r in rows:
                 parts.append(f"- {r['url']}")
             if c["new_urls"] > 15:
@@ -452,7 +459,7 @@ def run(threat_tiers: tuple[str, ...] = DEFAULT_THREAT_TIERS,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco Competitor Content Monitor")
+    parser = argparse.ArgumentParser(description="Competitor Content Monitor")
     parser.add_argument("--threat-tier", default=",".join(DEFAULT_THREAT_TIERS),
                         help=f"Comma-separated tiers (default: {','.join(DEFAULT_THREAT_TIERS)})")
     parser.add_argument("--domain", help="Restrict to one competitor by domain")

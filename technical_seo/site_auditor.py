@@ -53,6 +53,7 @@ import json
 import logging
 import sys
 import time
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -63,32 +64,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.connectors.crawler import Crawler, CrawlResult
 from common.database import connection, fetch_all, record_agent_run
+from common.tenant import profile
 
 
 logger = logging.getLogger("site_auditor")
 
 AGENT_NAME = "technical_seo.site_auditor"
 
-DEFAULT_PAGE_TYPES = ("home", "pillar", "service")
 DEFAULT_CADENCE_DAYS = 7
 DEFAULT_WORKERS = 4
+
+
+def default_page_types() -> tuple[str, ...]:
+    """Audit scope from tenant policy. Also the set treated as must-index."""
+    return tuple(profile().policy("audit_page_types", ()))
+
+
+def thin_content_thresholds() -> dict[str, int]:
+    """Word-count floors by page_type. A type absent here is never flagged."""
+    return profile().policy("thin_content_thresholds", {})
+
 
 # Title length sweet spot — Google truncates around 60 chars on desktop.
 TITLE_MIN_CHARS = 30
 TITLE_MAX_CHARS = 60
 META_DESC_MIN_CHARS = 70
 META_DESC_MAX_CHARS = 160
-
-# Word-count thresholds for thin_content, by page_type.
-THIN_CONTENT_THRESHOLDS = {
-    "home":     150,   # homepages can be lighter on copy
-    "pillar":   800,
-    "service":  300,
-    "blog":     300,
-    "resource": 200,
-    "landing":  100,
-    "glossary": 100,
-}
 
 # Redirect chains > this many hops are flagged.
 REDIRECT_MAX_HOPS = 2
@@ -208,7 +209,7 @@ def detect_alt_text_issues(r: CrawlResult) -> list[dict]:
 def detect_thin_content(r: CrawlResult, page_type: str | None) -> list[dict]:
     if page_type is None:
         return []
-    threshold = THIN_CONTENT_THRESHOLDS.get(page_type)
+    threshold = thin_content_thresholds().get(page_type)
     if threshold is None or r.word_count >= threshold:
         return []
     return [_issue("thin_content", {
@@ -300,7 +301,7 @@ def detect_indexability_issues(r: CrawlResult, page_type: str | None) -> list[di
     robots = r.meta_robots or ""
     if "noindex" in robots or "none" in robots:
         # Only treat as a problem for pages that *should* be indexed.
-        if page_type in ("home", "pillar", "service"):
+        if page_type in default_page_types():
             issues.append(_issue("noindex_meta", {
                 "meta_robots": robots, "page_type": page_type,
             }))
@@ -713,18 +714,121 @@ def print_summary(pages: list[dict], counters: dict,
             print(f"    {n:>2} issues  {url}")
         print()
 
+    clusters = cluster_issues(results)
+    if clusters:
+        print("  Likely shared causes (issues concentrated in one URL section):")
+        for c in clusters[:8]:
+            print(f"    {c['count']:>3}x {c['issue_type']:<28} — {c['share']:.0%} under {c['prefix']}")
+        print()
+        narrative = explain_clusters(clusters, counters)
+        if narrative:
+            print("  Reading:")
+            for line in narrative.splitlines():
+                print(f"    {line}")
+            print()
+
+
+# ---------------------------------------------------------------------------
+# Root-cause clustering
+#
+# A flat table of "43 missing_meta_description" tells you the count and
+# nothing about the cause. If all 43 sit under /blogs/, that is one broken
+# template and one fix, not 43 tickets. The clustering is deterministic; only
+# the sentence explaining it is generated, and it runs once per run over
+# aggregates rather than per page.
+# ---------------------------------------------------------------------------
+
+CLUSTER_MIN_COUNT = 4      # below this, "concentration" is just coincidence
+CLUSTER_MIN_SHARE = 0.6    # share of an issue type that must share a prefix
+
+
+def _url_section(url: str) -> str:
+    """First path segment, e.g. https://x.com/blogs/a/b -> /blogs/."""
+    path = urlparse(url).path or "/"
+    parts = [p for p in path.split("/") if p]
+    return f"/{parts[0]}/" if parts else "/"
+
+
+def cluster_issues(results: list[tuple[dict, CrawlResult]]) -> list[dict]:
+    """
+    Group issues by (type, URL section) and keep the concentrated ones.
+
+    Pure counting — no model involved, and the numbers below are the ones the
+    narrative is allowed to talk about.
+    """
+    by_type: dict[str, list[str]] = defaultdict(list)
+    for page, r in results:
+        if r.error or not r.is_html:
+            continue
+        for issue in run_all_detectors(r, page["page_type"]):
+            by_type[issue["issue_type"]].append(page["url"])
+
+    clusters: list[dict] = []
+    for itype, urls in by_type.items():
+        if len(urls) < CLUSTER_MIN_COUNT:
+            continue
+        sections = Counter(_url_section(u) for u in urls)
+        prefix, n = sections.most_common(1)[0]
+        share = n / len(urls)
+        if share >= CLUSTER_MIN_SHARE:
+            clusters.append({
+                "issue_type": itype,
+                "prefix":     prefix,
+                "count":      n,
+                "total":      len(urls),
+                "share":      share,
+                "severity":   SEVERITY.get(itype, "?"),
+                "examples":   urls[:3],
+            })
+    clusters.sort(key=lambda c: -c["count"])
+    return clusters
+
+
+def explain_clusters(clusters: list[dict], counters: dict) -> str | None:
+    """
+    One sentence per cluster on the likely shared cause. Advisory only —
+    this never touches `technical_issues`, because the issue state machine
+    depends on the same input producing the same issue set every run and a
+    non-deterministic detector would make issues flap open and closed.
+    """
+    if not clusters:
+        return None
+
+    facts = [
+        {k: c[k] for k in ("issue_type", "prefix", "count", "total", "severity", "examples")}
+        for c in clusters[:8]
+    ]
+    prompt = (
+        "These are technical SEO issues from one crawl, grouped by issue type "
+        "and the URL section they concentrate in.\n\n"
+        f"{json.dumps(facts, indent=2)}\n\n"
+        "For each group, write ONE line: the likely shared root cause and the "
+        "single fix that would clear the whole group. Prefer template, CMS or "
+        "config causes over per-page explanations — that is what concentration "
+        "in one section usually means. Use only the data above. No preamble, "
+        "no numbering, at most 8 lines."
+    )
+    try:
+        from common.llm import call_claude
+        text, _ = call_claude(prompt, tier="cheap", max_tokens=500, temperature=0.3)
+        return text.strip() or None
+    except Exception as exc:
+        logger.info("Cluster narrative unavailable (%s) — counts above still stand", exc)
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def run(domain: str | None = None,
-        page_types: tuple[str, ...] = DEFAULT_PAGE_TYPES,
+        page_types: tuple[str, ...] | None = None,
         cadence_days: int = DEFAULT_CADENCE_DAYS,
         workers: int = DEFAULT_WORKERS,
         force_all: bool = False,
         dry_run: bool = False) -> dict:
     start = time.monotonic()
+    page_types = page_types or default_page_types()
 
     pages = load_due_pages(domain, page_types, cadence_days, force_all)
     if not pages:
@@ -774,10 +878,12 @@ def run(domain: str | None = None,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Damco Site Auditor")
+    default_types = default_page_types()
+    parser = argparse.ArgumentParser(
+        description=f"{profile().brand_name} Site Auditor")
     parser.add_argument("--domain", help="Restrict to one domain")
-    parser.add_argument("--page-types", default=",".join(DEFAULT_PAGE_TYPES),
-                        help=f"Comma-separated page types (default: {','.join(DEFAULT_PAGE_TYPES)})")
+    parser.add_argument("--page-types", default=",".join(default_types),
+                        help=f"Comma-separated page types (default: {','.join(default_types)})")
     parser.add_argument("--cadence", type=int, default=DEFAULT_CADENCE_DAYS,
                         help=f"Days between audits per page (default: {DEFAULT_CADENCE_DAYS})")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
