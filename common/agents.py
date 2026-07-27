@@ -110,7 +110,8 @@ CATALOGUE: tuple[AgentSpec, ...] = (
     AgentSpec(
         name="keyword_intelligence.rank_tracker",
         title="Rank Tracker",
-        kind="deterministic",
+        kind="ai_assisted",
+        llm_tier="cheap",
         summary="Pulls SERP positions for due keywords, records our position plus "
                 "the full top 10, and emits competitor SERP events.",
         reads=("keywords", "keyword_serp_snapshots"),
@@ -118,8 +119,10 @@ CATALOGUE: tuple[AgentSpec, ...] = (
                 "competitors", "competitor_serp_events"),
         cadence_days=14,
         notes="Costs ~$0.00465 per keyword per run on the standard queue. "
-              "Bucketing, diffing and severity are arithmetic and must stay so — "
-              "executives reconcile these numbers week to week.",
+              "The ranking pipeline itself is arithmetic and must stay so — "
+              "executives reconcile these numbers week to week. The single LLM "
+              "touchpoint is categorizing newly-stubbed competitors where "
+              "category IS NULL, after the ranking data is already written.",
     ),
     AgentSpec(
         name="keyword_intelligence.gsc_enrichment",
@@ -136,11 +139,15 @@ CATALOGUE: tuple[AgentSpec, ...] = (
     AgentSpec(
         name="keyword_intelligence.reports",
         title="Ranking Reports",
-        kind="deterministic",
-        summary="Renders the executive Excel workbook from stored rankings.",
+        kind="ai_assisted",
+        llm_tier="default",
+        summary="Renders the executive Excel workbook from stored rankings, "
+                "including a narrated Executive Summary sheet.",
         reads=("keyword_rankings", "keywords"),
         writes=(),
-        notes="No agent_runs row today — it is a pure renderer invoked by hand.",
+        notes="No agent_runs row today — it is a pure renderer invoked by hand. "
+              "The narrative receives pre-computed aggregates only; every figure "
+              "in the workbook is calculated in Python. --no-narrative skips it.",
     ),
     AgentSpec(
         name="keyword_intelligence.trend_scout",
@@ -214,17 +221,22 @@ CATALOGUE: tuple[AgentSpec, ...] = (
     AgentSpec(
         name="technical_seo.sitemap_validator",
         title="Sitemap Validator",
-        kind="deterministic",
+        kind="ai_assisted",
+        llm_tier="cheap",
         summary="Walks each owned sitemap, validates every URL, and classifies "
                 "page types into the `pages` table.",
         reads=("pages",),
         writes=("pages", "technical_issues"),
         cadence_days=14,
+        notes="URL validation and the path rules are deterministic. The model "
+              "only sees URLs the rules returned None for, one batched call, "
+              "cached in pages.page_type. --no-llm skips it.",
     ),
     AgentSpec(
         name="technical_seo.site_auditor",
         title="Site Auditor",
-        kind="deterministic",
+        kind="ai_assisted",
+        llm_tier="cheap",
         summary="Crawls in-scope pages and runs 15 on-page detectors plus a "
                 "cross-page duplicate pass.",
         reads=("pages",),
@@ -232,7 +244,9 @@ CATALOGUE: tuple[AgentSpec, ...] = (
         cadence_days=14,
         notes="Opens, updates and auto-resolves technical_issues. Correctness "
               "depends on the same input producing the same issue set every run, "
-              "so no model may sit in the detector path.",
+              "so no model sits in the detector path. The one LLM call names the "
+              "likely shared cause of clustered issues, once per run, to the "
+              "console only — it never touches technical_issues.",
     ),
     AgentSpec(
         name="technical_seo.cwv_monitor",
@@ -405,6 +419,28 @@ def discover_agent_names() -> dict[str, str]:
     return found
 
 
+def discover_llm_users() -> set[str]:
+    """
+    Which agent modules actually reference `common.llm`.
+
+    Grepped from source rather than imported, for the same reason as
+    `discover_agent_names`: answering an inventory question should not
+    require a database and every optional dependency.
+    """
+    users: set[str] = set()
+    for folder in AGENT_FOLDERS:
+        d = REPO_ROOT / folder
+        if not d.is_dir():
+            continue
+        for path in sorted(d.glob("*.py")):
+            if path.name == "__init__.py":
+                continue
+            src = path.read_text(encoding="utf-8")
+            if "common.llm" in src or "from common import llm" in src:
+                users.add(f"{folder}.{path.stem}")
+    return users
+
+
 def validate() -> list[str]:
     """Return a list of problems. Empty means catalogue and filesystem agree."""
     problems: list[str] = []
@@ -422,6 +458,25 @@ def validate() -> list[str]:
             # reports.py is a renderer with no agent_runs row; catalogued for
             # completeness of the inventory, exempt from the AGENT_NAME rule.
             problems.append(f"CATALOGUE has {spec.name!r} but that module declares no AGENT_NAME")
+
+    # The `kind` label must match what the code actually does. This check
+    # exists because the catalogue drifted within hours of being written:
+    # rank_tracker and reports gained LLM calls and stayed labelled
+    # "deterministic", so `--list` under-reported AI usage. A registry that
+    # can quietly misdescribe the system is worse than no registry.
+    llm_users = discover_llm_users()
+    for spec in CATALOGUE:
+        uses_llm = spec.name in llm_users
+        if uses_llm and spec.kind != "ai_assisted":
+            problems.append(
+                f"{spec.name!r} references common.llm but is catalogued as "
+                f"{spec.kind!r} — set kind='ai_assisted' and declare an llm_tier"
+            )
+        elif not uses_llm and spec.kind == "ai_assisted":
+            problems.append(
+                f"{spec.name!r} is catalogued as 'ai_assisted' but never "
+                f"references common.llm — set kind='deterministic'"
+            )
 
     return problems
 

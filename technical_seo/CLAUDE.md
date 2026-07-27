@@ -52,9 +52,20 @@ Every module follows the standard lifecycle. Connectors used:
 - `common.connectors.crawler` — built. Polite HTTP+HTML fetcher returning a `CrawlResult` (title, meta, canonical, headings, JSON-LD, microdata, links, images, word_count). Used by site_auditor, canonical_checker, internal_link_analyzer.
 - `common.connectors.pagespeed` — built. CWV + Lighthouse score. Used by cwv_monitor.
 
-Use rule-based logic throughout. **All four modules are 100% deterministic — none imports `common/llm.py`.** This is deliberate, not a gap: every module in this folder opens, updates and auto-resolves rows in `technical_issues`, and that state machine depends on the same input producing the same issue set every run. A non-deterministic detector would make issues flap open and closed each cycle and corrupt `date_resolved` history.
+Use rule-based logic throughout. **Every detector in this folder is deterministic**, and that is deliberate: these modules open, update and auto-resolve rows in `technical_issues`, and that state machine depends on the same input producing the same issue set every run. A non-deterministic detector would make issues flap open and closed each cycle and corrupt `date_resolved` history.
 
-If AI is added here later it must write to a **separate advisory surface** (a report section, or a cached column written once per new URL) — never inline into a detector. LLM-assisted anchor recommendations for `internal_link_analyzer` remain deferred; the code explicitly defers them.
+Two modules do call a model, and both respect that boundary:
+
+| Module | LLM call | Where the output goes |
+|---|---|---|
+| `sitemap_validator` | Classifies URLs the path rules returned `None` for — one batched cheap-tier call per domain, cap 150 | `pages.page_type`, a cached column. `--no-llm` skips it. |
+| `site_auditor` | Names the likely shared cause of clustered issues — once per run, over counts | Console only. **Never touches `technical_issues`.** |
+
+`cwv_monitor` and `internal_link_analyzer` import no LLM at all.
+
+Anything added later must follow the same rule: a **separate advisory surface**, or a **cached column written once per entity** — never inline into a detector. LLM-assisted anchor recommendations for `internal_link_analyzer` remain deferred; the code explicitly defers them.
+
+`python -m common.agents --validate` enforces the labelling: a module that references `common.llm` may not be catalogued as `deterministic`, and vice versa.
 
 ## Safety rules (will apply once implemented)
 

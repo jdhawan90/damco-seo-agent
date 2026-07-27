@@ -1405,7 +1405,11 @@ def run(platform_id: int,
     print()
 
     return {
-        "status":           "success" if compliance["fail_count"] == 0 else "partial",
+        # Same verdict the agent_runs row gets. These disagreed: the DB said
+        # `failed` for a degraded run while this dict still said `success`,
+        # so a programmatic caller saw the opposite of what the operator saw.
+        "status":           run_status,
+        "degraded":         degraded,
         "file_path":        str(file_path),
         "activity_id":      activity_id,
         "word_count":       compliance["word_count"],

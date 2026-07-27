@@ -2,7 +2,15 @@
 
 This is the **authoritative runbook** for the Keyword Intelligence Agent. When invoked, find the section matching the user's intent and execute it exactly. Do not improvise.
 
-All commands run from the repo root (`damco-seo-agents/`). The Python interpreter path on the Windows machine is `C:/Users/jatind1/AppData/Local/Python/bin/python.exe` — on other machines use whatever is in `PATH`.
+All commands run from the repo root (`damco-seo-agents/`). Python is not on `PATH` on the Windows machine — the interpreter is `C:/Users/jatind1/AppData/Local/Python/pythoncore-3.14-64/python.exe`. On other machines use whatever is in `PATH`.
+
+**Prerequisite — the tenant profile.** Client identity lives in the `tenant*` tables (migration 012), not in the code. Apply migrations before the first run on any database:
+
+```bash
+python sql/migrate.py
+```
+
+Without a tenant row every module here raises `TenantNotConfigured`. `rank_tracker` and `trend_scout` read `profile().brand_name` while building their argparse description, so even `--help` fails if the database is unreachable. If a command dies with `TenantNotConfigured`, run the migration — do not add a default.
 
 ---
 
@@ -17,6 +25,7 @@ All commands run from the repo root (`damco-seo-agents/`). The Python interprete
 | "show me striking distance", "which keywords are close to top 10" | [5. Query: striking distance](#5-query-striking-distance) |
 | "how is [executive] doing", "show [name]'s keywords" | [6. Query: executive performance](#6-query-executive-performance) |
 | "show recent runs", "what's the last run", "is anything broken" | [7. Query: agent run health](#7-query-agent-run-health) |
+| "what agents exist", "which ones use AI", "when did X last run" | `python -m common.agents` (see [section 7](#7-query-agent-run-health)) |
 | "dry run", "what would happen if", "test without writing" | [8. Dry run](#8-dry-run) |
 | User provides an Excel and asks to import keywords | [9. Ad-hoc data import](#9-ad-hoc-data-import) |
 | "find new keywords", "what's trending", "new buzz phrases", "what is the industry talking about", "emerging terms" | [10. Trend discovery](#10-trend-discovery) |
@@ -30,7 +39,7 @@ All commands run from the repo root (`damco-seo-agents/`). The Python interprete
 
 **When:** user asks to track rankings, refresh the database, or doesn't specify scope.
 
-**Cost check:** 1,112 keywords × $0.0006 = ~$0.67 on standard queue. Live queue is ~$2.20. If the user hasn't specified, use **standard**. Default cadence is fortnightly — a routine run should filter to keywords whose latest snapshot is older than `keywords.snapshot_frequency_days` (default 14), which can drop cost below $0.67 once partial snapshots accumulate.
+**Cost check:** 2,126 active keywords × $0.00465 = **~$9.89** on the standard queue; ~$25.51 on live. That is well over the $1 confirmation threshold, so **a forced full run always needs the user's explicit go-ahead.** If the user hasn't specified a queue, use **standard**. Default cadence is fortnightly — the plain command (no `--all`) filters to keywords whose latest snapshot is older than `keywords.snapshot_frequency_days` (default 14), which is normally a small fraction of the 2,126 and correspondingly cheap. Count what is actually due before quoting a number.
 
 **Steps:**
 
@@ -39,17 +48,22 @@ All commands run from the repo root (`damco-seo-agents/`). The Python interprete
    ```bash
    python -m keyword_intelligence.rank_tracker
    ```
-   Flags:
+   Flags (this is the complete list — `--help` confirms it):
    - `--offering "AI"` — restrict to one offering (still respects cadence)
-   - `--all` — force every active keyword regardless of last snapshot date (use sparingly; a full forced run on 1,112 keywords costs ~$0.67)
-   - `--queue live` — synchronous SERP fetch, ~3x cost
+   - `--all` — force every active keyword regardless of last snapshot date (use sparingly; a full forced run on 2,126 keywords costs ~$9.89)
+   - `--queue live` — synchronous SERP fetch, ~2.6x cost
    - `--dry-run` — call DataForSEO but skip all DB writes
+   - `--no-llm` — skip the competitor categorization pass at the end; new competitors stay `category = NULL` for human review. Rankings are unaffected.
+   - `--drain-ready` — recovery mode: pull already-completed tasks from DataForSEO's ready queue. No new `task_post`, no new spend. Use this after a polling timeout left paid-for tasks unfetched. Honours `--offering`.
    - `--skip-gsc` — skip the GSC enrichment step at the end
+   - `--gsc-days N` — GSC lookback window (default 14)
+   - `--verbose` / `-v` — debug logging
 3. The command prints:
-   - Batch progress (~12 batches of 100 keywords)
+   - Batch progress (~22 batches of 100 keywords on a forced full run)
    - Bucket distribution (1-5, 5-10, 10-20, 20-50, 50+, not-found)
-   - Per-keyword position and matched Damco domain
+   - Per-keyword position and the matched owned domain
    - Striking distance list (positions 11–20)
+   - `Competitors categorized: N` — only when the pass resolved something
    - Summary totals
 4. **Competition tracking write contract** — for every keyword queried, the tracker also writes:
    - One row to `keyword_serp_snapshots` (SERP-level context: AI Overview presence + cited domains, SERP features, damco position, top 10 array)
@@ -58,25 +72,32 @@ All commands run from the repo root (`damco-seo-agents/`). The Python interprete
    - Calls `recompute_competitor_aggregates(competitor_id)` for every touched competitor — this updates `keyword_appearance_count`, `offering_appearance_count`, `threat_tier` and emits `threat_tier_changed` events when the tier flips
    - Diff vs previous snapshot → emits events to `competitor_serp_events` (`new_entrant`, `drop_out`, `position_gain`, `position_drop`, `damco_*`, `serp_feature_*`)
    - At end of cycle: `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_offering_competition` (must run outside the snapshot transaction)
-5. GSC enrichment runs automatically at the end (14-day lookback). It prints its own summary.
-6. After completion, verify the agent run was logged:
+
+   The `device` written to `keyword_serp_snapshots` is `settings.DATAFORSEO_DEVICE` (default `desktop`), and the cadence query reads back the same value. It used to be a `'desktop'` literal in three SQL statements while the setting sat unreferenced — a mobile-first client would have been silently served desktop data. Device is part of the snapshot key, so switching it starts a parallel history.
+5. **Competitor categorization** runs last, after the view refresh. One batched cheap-tier call over up to 100 domains where `competitors.category IS NULL`, ordered by `keyword_appearance_count`. It writes only into NULL rows — human curation is never overwritten — and any answer outside `direct / adjacent / big_tech / aggregator / informational / unrelated` is discarded rather than guessed. The whole step is wrapped in a try/except: it is advisory enrichment and must never cost you the ranking data already written. Suppress it with `--no-llm`.
+6. GSC enrichment runs automatically at the end (14-day lookback, or `--gsc-days`). It prints its own summary.
+7. After completion, verify the agent run was logged:
    ```bash
    python -c "import sys; sys.path.insert(0, '.'); from common.database import fetch_all
    for r in fetch_all('SELECT agent_name, status, records_processed, run_date, metadata FROM agent_runs ORDER BY run_date DESC LIMIT 2'):
        print(r)"
    ```
-7. Report back to user:
+8. Report back to user:
    - Total keywords tracked
    - Brand found / not found split
    - New striking distance keywords (if any)
    - Competition-side highlights: count of `new_entrant`, `position_gain`, `damco_*` events at severity ≥ medium
+   - Competitors categorized this run, if any
    - Any errors from either phase
 
 **Failure modes:**
 
+- **`TenantNotConfigured`** → no tenant row. Run `python sql/migrate.py`. Nothing was spent.
 - **DataForSEO auth fails** → check `DATAFORSEO_LOGIN` / `DATAFORSEO_PASSWORD` in `.env`. Tell the user; don't retry.
 - **GSC fails but DataForSEO succeeded** → expected when OAuth token expired. DataForSEO results are saved. Tell the user to re-run GSC once fixed (see section 4).
 - **A single batch fails** → other batches succeed; affected keywords get `error` entries. Run status becomes `partial`.
+- **Polling timed out after `task_post`** → the tasks are paid for and sitting in DataForSEO's ready queue. Recover with `python -m keyword_intelligence.rank_tracker --drain-ready` — no new spend. Do **not** re-run the tracker normally; that pays twice.
+- **Competitor categorization unavailable** (no Anthropic credit, no key) → logged at INFO, domains stay NULL, run still succeeds. Not a failure worth reporting as one.
 
 ---
 
@@ -96,6 +117,7 @@ All commands run from the repo root (`damco-seo-agents/`). The Python interprete
   for r in fetch_all('SELECT offering, count(*) FROM keywords WHERE status = %s GROUP BY offering ORDER BY offering', [\"active\"]):
       print(r)"
   ```
+  The canonical list is the profile's — `python -c "import sys; sys.path.insert(0,'.'); from common.tenant import profile; print(profile().offering_names)"` (15 offerings). If a value in `keywords.offering` isn't in that tuple, the two have drifted; say so rather than papering over it.
 
 - **By executive** (e.g., "run for Khushbu"): the tracker doesn't have an `--executive` flag directly. Two options:
   1. Identify the executive's offerings and run per-offering (fastest).
@@ -115,21 +137,29 @@ Confirm the user's preference before choosing.
    ```bash
    python -m keyword_intelligence.reports
    ```
-   Optional flags:
+   Optional flags (the complete list):
    - `--offering "AI"` — filter to one offering
    - `--start 2026-04-01 --end 2026-04-17` — restrict the date range
-   - `--output path/to/file.xlsx` — custom output path
+   - `--output path/to/file.xlsx` / `-o` — custom output path
+   - `--no-narrative` — skip the Executive Summary sheet entirely (no LLM call)
 
-2. The file is saved under `outputs/reports/ranking_report_<date>.xlsx`. It has 5 sheets:
+2. The file is saved under `outputs/reports/ranking_report_<date>.xlsx`. It has **6 sheets** (5 with `--no-narrative`):
    - **Summary** — bucket distribution per snapshot
+   - **Executive Summary** — prose interpretation, sheet position 2
    - **Detailed Rankings** — wide-format keyword × date + GSC columns (Avg Pos, Clicks, Impressions, CTR)
    - **Movement** — gains/drops between the two most recent snapshots
    - **Striking Distance** — positions 11–20 in the latest snapshot
    - **GSC Performance** — GSC metrics with SERP-vs-GSC gap analysis
 
-3. Tell the user the file path and highlight the most interesting 3–5 findings (biggest mover, new striking distance entries, high-impression low-CTR keywords).
+   The command prints the actual sheet list it wrote — read that rather than assuming.
 
-**Prerequisite:** there must be at least one ranking snapshot in `keyword_rankings`. If the table is empty, tell the user to run section 1 first.
+3. **How the Executive Summary works, and what it is allowed to say.** `compute_narrative_facts()` computes every figure in Python: bucket counts, improved/declined counts, top 10 movers each way, striking-distance count, average position per offering, and the count of keywords where the SERP snapshot and GSC's average differ by 5+ positions. Only those finished aggregates go to the model, which is instructed to use no other numbers and to do no arithmetic. **The model never sees a ranking row.** That boundary is deliberate: these are the numbers executives reconcile against last month's workbook.
+
+   If the model is unavailable, the sheet falls back to `_rule_based_narrative()` — a real deterministic summary, not a placeholder. The sheet footer records which one produced the text (`Source: rule-based` or `Source: Claude (<model>)`). **Check that footer before quoting the summary to anyone**; while the Anthropic balance is exhausted it will say rule-based.
+
+4. Tell the user the file path and highlight the most interesting 3–5 findings (biggest mover, new striking distance entries, high-impression low-CTR keywords).
+
+**Prerequisites:** there must be at least one ranking snapshot in `keyword_rankings`. If the table is empty, tell the user to run section 1 first. `reports` writes no `agent_runs` row — it is a pure renderer, so don't go looking for one afterwards.
 
 ---
 
@@ -149,9 +179,19 @@ Optional:
 - `-v` — verbose matching logs
 
 **Output:**
-- GSC queries returned (expect 10k–20k for damcogroup.com)
-- Matched vs. not-matched keyword counts
+- GSC queries returned (expect 10k–20k for the primary property)
+- Matched vs. not-matched keyword counts, plus an `of which long-tail` line — how many matches came from the fallback rather than an exact query match
 - Per-keyword table: keyword | GSC position | clicks | impressions | CTR
+
+**How matching works.** Exact query match first. Failing that, the fallback finds GSC queries that contain the **whole tracked keyword** on word boundaries, and among those picks the **shortest** query (ties broken by impressions).
+
+Two things were wrong before and both inflated the numbers:
+- Matching was bidirectional, so a *broader* GSC query could claim a narrower tracked keyword — tracked "crm for insurance" would take the metrics for the query "crm".
+- It was raw substring, so "crm" also matched "scrm" and "crmsoftware".
+
+Directional plus word-boundary now, and closest-match rather than highest-impression, because `max(impressions)` systematically picked the most generic variant. **Expect the match count to be lower than historical runs.** That is the fix working, not a regression — don't chase it.
+
+`gsc_enrichment` deliberately never calls a model. A non-deterministic match would jitter position history for reasons unrelated to ranking.
 
 **GSC data lag:** Google reports a ~3-day lag. A 14-day run actually covers `today - 17 days` to `today - 3 days`. This is by design.
 
@@ -239,6 +279,17 @@ LIMIT 10;
 ```
 
 Present: last 10 runs with status, records, duration. Highlight any `error` or `partial` statuses. If the last run is older than 2 weeks, mention that tracking may be stale.
+
+**For "what agents exist" / "when did X last run" across the whole system, use the registry rather than any prose table in a CLAUDE.md:**
+
+```bash
+python -m common.agents                       # all 22 agents, folder-grouped, with last-run status
+python -m common.agents --folder keyword_intelligence
+python -m common.agents --validate            # catalogue vs. filesystem
+python -m common.agents --json                # machine-readable
+```
+
+This is the honest answer — it reads `agent_runs`, so it cannot drift the way a hand-maintained status table does. Note that `keyword_intelligence.reports` shows `never`: it logs no `agent_runs` row by design.
 
 ---
 
@@ -385,9 +436,11 @@ Never rely on "it'll get overwritten on re-import" — ON CONFLICT only handles 
 
 **When:** the user asks what's trending, wants new keyword ideas, or asks what the industry is talking about that we don't track.
 
-**What it does:** polls ~41 registered feeds (tech press, practitioner communities, Medium tag feeds), extracts recurring phrases, drops what we already track, classifies each into an offering, prices it against Google Ads Keyword Planner, and scores it. Results land in `keyword_candidates` — **never** in `keywords`.
+**What it does:** polls the ~41 enabled feeds in `trend_sources` (tech press, practitioner communities, Medium tag feeds), extracts recurring phrases, drops what we already track, classifies each into an offering, prices it against Google Ads Keyword Planner, and scores it. Results land in `keyword_candidates` — **never** in `keywords`.
 
-**Cost:** ~$0.05 per run (one Keyword Planner batch covers up to 1,000 keywords) plus a few cents of Claude Haiku classification. Feeds are free. Well under the $1 confirmation threshold — just run it.
+The offering vocabulary, the commercial tokens and the generic-head news nouns all come from the tenant profile (`tenant_offerings`, `tenant_vocabularies`), cached per process. Keyword Planner is now queried with the profile's `location_code` / `language_code` rather than the connector default. To retune classification, edit those tables — not this module.
+
+**Cost:** ~$0.05 per run (one Keyword Planner batch covers up to 1,000 keywords) plus a few cents of Claude Haiku classification. Feeds are free. Voyage embeddings are rounding error — $0.02 per million tokens on ~5-token inputs, and the tracked set is embedded once and cached. Well under the $1 confirmation threshold — just run it.
 
 **Runtime:** ~4-5 minutes. Most of it is polite rate limiting, Reddit especially (12s between subreddits, ~2.5 min for the 13 of them).
 
@@ -409,9 +462,22 @@ python -m keyword_intelligence.trend_scout --no-volume
 
 # Token rules only, no Claude
 python -m keyword_intelligence.trend_scout --no-llm
+
+# Skip the Excel/markdown artifacts
+python -m keyword_intelligence.trend_scout --skip-reports
 ```
 
+Tuning flags, rarely needed: `--max-items` (per source, default 60), `--min-mentions` (default 2), `--min-spread` (distinct sources, default 2), `--max-volume-lookups` (Keyword Planner cap, default 600), `--verbose`.
+
 **Cadence:** weekly or fortnightly. Daily is supported and cheap, but a 14-day window won't shift much day to day.
+
+**Novelty is checked twice.** Token-set Jaccard runs first as a cheap prefilter during extraction. Jaccard cannot see paraphrase — "ai agent orchestration platform" and a tracked "agentic ai development services" share almost no tokens and scored as unrelated — so the survivors are re-checked against Voyage embeddings (`voyage-3-lite`, cached in `keyword_embeddings`, migration 015). One batched call per run, then arithmetic. The threshold is 0.80 similarity, and the re-check only ever makes a candidate *less* novel; a high Jaccard score is never overridden downward.
+
+This is a spend guard, not a nicety: a promoted paraphrase costs money on every future rank-tracker run, forever.
+
+Read the run output to know which one you got:
+- `Semantic novelty:    N checked, M reclassified as near-duplicates` — embeddings ran
+- `Semantic novelty:    skipped (embeddings unavailable — Jaccard result kept)` — **dormant.** `VOYAGE_API_KEY` is unset or the `voyageai` SDK is missing. The run is still valid, but near-duplicates will get through, so review the candidate list more sceptically before promoting.
 
 **Reading the output.** Five sub-scores roll into `trend_score`:
 
@@ -430,7 +496,9 @@ python -m keyword_intelligence.trend_scout --no-llm
 - **Most candidates are AI.** That's what the industry is publishing about. The "By Offering" sheet shows the distribution honestly; use `--offering` to dig into a quieter area.
 - **A second run the same day finds few new mentions.** Correct — mentions are deduped by content hash. Scoring still runs over the full rolling window, so the candidate list stays stable rather than collapsing to near-empty.
 - **Implausibly large search volumes** (e.g. "frontier ai" at 2.2M/mo). Keyword Planner groups close variants and this is its own number, reported faithfully. Sanity-check anything above ~500k before promoting it.
-- **`suggested_offering` is sometimes wrong** on generically-worded phrases. Confidence is recorded (`offering_confidence`); rule matches score 0.75, source hints 0.50. Fix it in the review step, not by editing code.
+- **`suggested_offering` is sometimes wrong** on generically-worded phrases. Confidence is recorded (`offering_confidence`); rule matches score 0.75, source hints 0.50. Fix it in the review step, or in `tenant_offerings` if the token vocabulary is genuinely missing something. Not by editing code.
+- **`trend_score` sits higher than it used to for rule-classified candidates.** `intent` was only ever set on LLM-classified ones, so roughly 80% of candidates could never earn the 1.15x commercial multiplier — they were systematically under-scored against whichever ones the LLM happened to handle. `_infer_intent()` now assigns intent by rule too (transactional / informational / commercial), using the same vocabulary the classifier uses, and LLM intent still wins when present. `intent` also lands in `keywords.intent` on promotion, so the old gap outlived the run. **Scores are not comparable to candidates generated before 2026-07-27.**
+- **The classifier prompt doesn't name the company.** Identity goes in via `system_preamble()` as `system=`; the user prompt lists only the offerings, tenant-neutral by construction. If you see a brand name in a user prompt anywhere in this folder, that's a bug.
 
 ---
 
@@ -444,6 +512,15 @@ python -m keyword_intelligence.trend_scout --no-llm
 
 ```bash
 python -m keyword_intelligence.trend_scout --list-candidates --min-score 60 --limit 40
+```
+
+`--list-candidates` defaults to `status='new'`. Use `--status` to review what
+you have already triaged — `approved`, `rejected`, `promoted`, `duplicate`,
+`reviewed`, or `all`:
+
+```bash
+python -m keyword_intelligence.trend_scout --list-candidates --status approved
+python -m keyword_intelligence.trend_scout --list-candidates --status rejected --limit 20
 ```
 
 Or in SQL, for the richer view:
@@ -546,5 +623,6 @@ UPDATE trend_sources SET enabled = FALSE, last_error = '<why>' WHERE name = '...
 
 1. **Always show the result**, not just "done" — numbers, keywords, filepaths.
 2. **Suggest a logical next step** if obvious (e.g., after a tracking run, suggest generating the report).
-3. **Log to agent_runs** — `rank_tracker.py` and `gsc_enrichment.py` do this automatically. For ad-hoc DB work, consider whether a custom `agent_runs` entry helps audit trail.
+3. **Log to agent_runs** — `rank_tracker.py`, `gsc_enrichment.py` and `trend_scout.py` do this automatically. `reports.py` does not; it is a renderer, not an agent run. For ad-hoc DB work, consider whether a custom `agent_runs` entry helps audit trail.
 4. **Never claim success without verification** — always read back at least one row of what was written.
+5. **Say which path produced any generated prose.** The Executive Summary sheet and the competitor categories both degrade silently to their non-LLM fallback. Reporting model output when the rule-based fallback actually ran is how these runbooks went stale in the first place.

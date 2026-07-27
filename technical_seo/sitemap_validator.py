@@ -177,8 +177,14 @@ def categorize_page_type(url: str) -> str | None:
 # Three constraints make the cost bounded:
 #   * only URLs that returned None reach here
 #   * one batched call per run, not one per URL
-#   * the answer is written to `pages.page_type`, so a URL is classified once
-#     and never re-sent
+#   * the answer persists in `pages.page_type` for every downstream consumer
+#
+# Note what is NOT true: a URL the rules cannot place is re-sent on every run,
+# because the unknown set is derived from `categorize_page_type()` and this
+# module never reads `pages.page_type` back. The write is stable — `upsert_page`
+# COALESCEs, so the first classification wins and a later low-confidence answer
+# cannot overwrite it — but the call is repeated. Cost is one cheap batched
+# call per domain per run, which is why this is documented rather than fixed.
 # ---------------------------------------------------------------------------
 
 VALID_PAGE_TYPES = ("home", "pillar", "service", "blog", "resource",

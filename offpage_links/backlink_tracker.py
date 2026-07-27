@@ -84,6 +84,7 @@ from common.connectors.dataforseo import (
     get_backlinks,
 )
 from common.database import connection, fetch_all, fetch_one, record_agent_run
+from common.tenant import profile
 
 
 logger = logging.getLogger("backlink_tracker")
@@ -256,8 +257,12 @@ def build_per_page_summary(page: dict, dfs_rows: list[dict] | None,
                 dofollow += 1
             elif r.get("dofollow") is False:
                 nofollow += 1
-            if r.get("rank") is not None:
-                da_scores.append(int(r["rank"]))
+            # domain_rank (0-100), not the raw `rank` (0-1000). The stored
+            # column is normalized; averaging the raw field here made the
+            # report's "Avg DA" read about 10x high and disagree with the
+            # database it was summarising.
+            if r.get("domain_rank") is not None:
+                da_scores.append(int(r["domain_rank"]))
 
     return {
         "page_id":          page["id"],

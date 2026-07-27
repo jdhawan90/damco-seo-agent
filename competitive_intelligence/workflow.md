@@ -1,6 +1,23 @@
 # Competitive Intelligence — Workflow Runbook
 
-Runbook for the Competitive Intelligence Agent. `gap_analyzer.py` is **available now**; the other modules are still planned. The SERP-side schema (migration 004) is in place and populated with real data.
+Runbook for the Competitive Intelligence Agent. All five modules are built; `backlink_analyzer` is blocked on a DataForSEO subscription. The SERP-side schema (migration 004) is in place and populated with real data. Commands assume repo root as working directory.
+
+## Prerequisites
+
+**1. Apply migrations.** No module here runs without a tenant row — `common.tenant.profile()` raises `TenantNotConfigured` rather than guessing whose brand this is.
+
+```bash
+python sql/migrate.py
+```
+
+Migration 012 seeds the tenant tables; 016 adds `competitor_pages.content_hash_algo`, which `competitor_monitor` needs to avoid a false-positive storm on its next run (see §1).
+
+**2. Check what has actually run** — don't guess from this file:
+
+```bash
+python -m common.agents --folder competitive_intelligence
+python -m common.agents --validate
+```
 
 ## Decision tree
 
@@ -49,6 +66,21 @@ Each detected delta becomes one row in `competitor_changes`:
 | `content_update` | 0.40-0.80 | Only fires if no other change above; significance scales with word_count delta |
 | `removed` | 0.50 | URL now returns 404 or 410 (true "gone" signals only — 403 bot-blocks and 5xx transient errors are filtered) |
 
+### `content_update` now sees real body text — expect a quiet first run
+
+`content_hash` used to be a proxy: `sha256("wc=<n>|<title>|<meta>|<h1>")`. That could not detect a body rewrite. A competitor could replace every paragraph, land on the same word count and keep the title, and `content_update` would never fire — in the agent whose entire job is detecting competitor content changes.
+
+It is now `CrawlResult.text_hash`: sha256 of the page's visible text with `script`/`style`/`noscript`/`template` stripped and whitespace and case normalized, so a re-indent or a reflow does not read as an edit. The old proxy survives as a fallback for responses the crawler could not read as text (non-HTML, or a body over the 5 MB cap), so an unreadable page doesn't masquerade as an unchanged one.
+
+**Migration 016 records which algorithm produced each stored hash.** All 52 pre-existing `competitor_pages` rows are marked `proxy_v1`; new writes are `text_v2`. Hashes from different algorithms are not comparable, so when the stored marker doesn't match the current one the monitor **stores the new hash and emits nothing**.
+
+Practical consequence: **the first run after this change reports unusually few content changes, and that is the correct outcome.** Without the marker it would have fired 52 `content_update` events for edits that never happened, on the day the fix landed — and `competitor_changes` is append-only, so that noise would be permanent. Real detection resumes on the run after. Confirm the re-baseline completed:
+
+```sql
+SELECT content_hash_algo, count(*) FROM competitor_pages GROUP BY 1;
+-- all rows should read text_v2 once every URL has been re-crawled
+```
+
 ### Status-code handling
 
 - **200 + HTML** → normal diff path
@@ -87,6 +119,8 @@ Free (HTTP only via shared crawler). Rate-limited 1 req/sec/origin by the crawle
 
 Validated on primary-tier AI scope (52 URLs): ~40 seconds. First run produced 46 `new_page` events; immediate re-crawl produced 0 events (diff logic confirmed only firing on real changes).
 
+Fetches carry the tenant's crawler identity (`tenants.crawler_bot_name` + `crawler_contact_url`), not a hardcoded string — competitors see it in their logs, and it is what their `robots.txt` rules match against.
+
 ---
 
 ## 2. Backlink analyzer
@@ -109,16 +143,22 @@ To activate:
 - Upserts into `competitor_backlinks` (migration 008): source_url, source_domain, target_url, anchor_text, dofollow, domain_rank (0-100 authority), first_seen, last_seen.
 - Cross-analyzes:
   - Top referring domains across all primary threats
-  - **Outreach prospects** — referring domains linking to ≥2 primary threats (highest-leverage targets; they already publish about this space)
+  - **Outreach prospects** — referring domains linking to ≥2 primary threats **and not already linking to us** (highest-leverage targets; they already publish about this space)
   - Anchor-text patterns competitors are building
 - Per-URL cadence: re-pulls only if previous fetch is older than `--cadence` days (default 30).
+
+### The "already links to us" exclusion
+
+The prospect list subtracts every domain that already appears as a `source_domain` in the `backlinks` table, matched after `strip_www` normalization. Pitching a site that already links to you wastes the slot and reads as careless; before this the module had no concept of "us" at all. The run logs how many domains were excluded, and the count is returned as `already_linking_to_us`.
+
+**Right now that count will be zero.** `backlinks` is populated by `offpage_links.backlink_tracker`, which has never run — the table holds 0 rows — so nothing gets subtracted yet. Same subscription unblocks both. Once `backlink_tracker` runs, re-run this module with `--analyze-only` to get a corrected prospect list without paying for the API again.
 
 ### Outputs
 
 - `outputs/reports/backlink_analysis_<date>.xlsx` — 4 sheets:
   - Per-Competitor (summary stats)
   - Top Referring Domains (all)
-  - Outreach Prospects (≥2 competitors linked, not Damco)
+  - Outreach Prospects (≥2 competitors linked, minus domains already linking to us)
   - Anchor Patterns
 - `outputs/audits/backlink_analysis_<date>.md` — narrative report
 
@@ -168,7 +208,7 @@ For each tracked competitor (default: `primary` tier):
 4. For each genuinely new URL:
    - INSERT into the manifest with `first_seen = today`
    - Emit a `competitor_changes` event with `change_type='new_page'`
-   - Bump significance to **0.6** (vs the default 0.4) when the URL path matches a slug of any active Damco keyword. These are the "topical threats" — competitor publishing about your space.
+   - Bump significance to **0.6** (vs the default 0.4) when the URL path matches a slug of any active tracked keyword. These are the "topical threats" — competitor publishing about your space. The `diff_summary` text names the tenant's brand from the profile; rows written before the profile landed keep the old literal spelling and are not migrated.
 5. For URLs missing from the new sitemap: mark `is_active=FALSE`. No event emitted (sitemap drop-outs are too noisy to alert on — often reorganizations, not deletions).
 
 ### Cadence
@@ -208,7 +248,7 @@ Free — HTTP only (sitemap fetches). Rate-limited per-sitemap-walk by `common.s
 ### Validation (2026-05-28)
 
 - Scanned `itransition.com`: 1,160 URLs discovered from sitemap; first-run treated all as new.
-- 6 URLs had paths matching Damco-tracked keyword slugs — flagged at significance 0.6:
+- 6 URLs had paths matching tracked keyword slugs — flagged at significance 0.6:
   - `/company/news/itransition-becomes-a-salesforce-partner` (Achieva relevance)
   - `/insurance/policy-management-software` (Insurance)
   - `/insurance/reinsurance-software` (Insurance)
@@ -229,11 +269,11 @@ Classifies every active keyword by competitive gap type using the populated `com
 
 | Type | Trigger | Action implication |
 |---|---|---|
-| `coverage_gap` | Damco not in top 100 AND ≥1 tracked competitor in top 10 | No competing page exists (or it's invisible). Content investment. |
-| `displacement` | Damco at #11-30 AND competitor in top 10 | Page exists; needs targeted on-page work to push past specific competitors. Quick-win territory. |
+| `coverage_gap` | we are not in top 100 AND ≥1 tracked competitor in top 10 | No competing page exists (or it's invisible). Content investment. |
+| `displacement` | we are at #11-30 AND competitor in top 10 | Page exists; needs targeted on-page work to push past specific competitors. Quick-win territory. |
 | `cluster_win` | Same competitor wins top-10 placements for ≥3 keywords in the offering | They dominate a sub-niche; cluster strategy needed (multiple pages). |
-| `low_priority` | Damco rank > 30 | Has content but far from page 1. Lower ROI unless GSC traffic is meaningful. |
-| `none` | Damco in top 10 | Already defended. |
+| `low_priority` | our rank > 30 | Has content but far from page 1. Lower ROI unless GSC traffic is meaningful. |
+| `none` | we are in top 10 | Already defended. |
 
 ### Severity scoring (1-10)
 
@@ -244,17 +284,24 @@ GSC-traffic-weighted: gaps on keywords with real Google impressions/clicks score
 - +2 if ≥100 GSC impressions in 14 days
 - +3 if any GSC clicks in 14 days (real money at stake)
 - +1 if any top-10 competitor is `threat_tier = primary`
+- **−2 when ≥60% of the typed top-10 results are `listicle` or `docs`** — floored at 0
+
+That last one is a SERP-shape penalty. `page_type` was being selected and carried into every gap record and then used in no score, so a keyword whose entire top 10 is round-ups and directories ranked level with one owned by service pages. You cannot rank a service page against ten "top 20 vendors" listicles, and telling someone to try is confidently wrong advice.
+
+It down-weights rather than excludes: these keywords are still worth a *different* asset — a comparison page, a calculator, or pursuing inclusion in the round-ups themselves — just not the obvious one. Only results with a non-NULL `page_type` count toward the ratio, so a SERP with no typed results is never penalized.
 
 ### LLM narrative (optional)
 
 `--with-narrative` invokes Claude (model = `CLAUDE_MODEL_DEFAULT`, default `sonnet-4-6`) to produce a per-offering executive summary + 5 prioritized recommendations with QUICK WIN vs INVESTMENT labels. Costs ~$0.02-0.05 per offering with Sonnet.
+
+Brand identity reaches the model through `system_preamble()` as `system=`, never interpolated into the user prompt — the prompt itself is tenant-neutral.
 
 When ANTHROPIC_API_KEY is missing or credit is exhausted, falls back to a rule-based summary. The reports still generate; only the strategic narrative is downgraded.
 
 ### Outputs
 
 - **`outputs/reports/gap_analysis_<date>.xlsx`** — single workbook covering whatever offerings ran:
-  - Sheet 1 *Per-Keyword*: one row per active keyword with gap_type, severity, Damco position, GSC data, top 3 competitors
+  - Sheet 1 *Per-Keyword*: one row per active keyword with gap_type, severity, our position, GSC data, top 3 competitors
   - Sheet 2 *Cluster Wins*: every competitor winning ≥3 keywords in any offering
   - Sheet 3 *Summary*: per-offering totals
 - **`outputs/audits/gap_analysis_<offering>_<date>.md`** — one markdown report per offering with narrative (LLM or rule-based), cluster wins table, full coverage/displacement lists
@@ -281,6 +328,8 @@ python -m competitive_intelligence.gap_analyzer --dry-run
 - 347 coverage gaps, 358 displacement gaps, 1,008 cluster wins flagged
 - AI offering's top quick-win candidates surfaced correctly (ai consulting companies, ai software development variants, ai application development family)
 - Top content-investment candidate `ai agent development` flagged correctly — page exists at `/ai-agent-development` but isn't ranking; GSC shows 8 clicks / 1,063 impressions waiting to be unlocked
+
+Gap-type counts are unaffected by the listicle penalty, but severity scores and therefore the quick-win ordering shifted after 2026-07-27. Re-run before quoting the priority list.
 
 ---
 
@@ -414,7 +463,7 @@ GROUP BY e.event_type
 ORDER BY occurrences DESC;
 ```
 
-Event severity filter for the digest agent (when `event_digest.py` is built, this is the read query):
+The severity + window filter `event_digest` itself uses:
 ```sql
 SELECT * FROM competitor_serp_events
 WHERE severity IN ('critical', 'high')
@@ -467,7 +516,7 @@ ORDER BY d.event_date DESC, k.offering;
 
 **Available now.** `keyword_serp_snapshots` records AI Overview presence + cited domains per keyword, per snapshot.
 
-Keywords where damco is/isn't cited in AI Overview:
+Keywords where we are / aren't cited in AI Overview. Substitute the tenant's primary domain for the literal below — `SELECT primary_domain FROM tenants WHERE status = 'active'`:
 ```sql
 SELECT k.keyword, k.offering,
        s.date,
@@ -506,13 +555,20 @@ Reads `competitor_serp_events` and produces a markdown digest of changes that ha
 
 By default: events with severity `critical`, `high`, or `medium`. Add `--all-severity` to include `low`/`info` (mostly noise).
 
-Events are grouped into report sections:
+Events are grouped into report sections. The heading of the first one renders the tenant's brand name from the profile; the `damco_*` strings it matches on are literal `event_type` values in the database and cannot be renamed without migrating ~85,000 rows.
 
-1. **🚨 Damco-side movements** — `damco_drops_top_n`, `damco_enters_top_n`, `damco_position_change` (our own SERP positions changing)
+1. **🚨 `<brand>`-side movements** — `damco_drops_top_n`, `damco_enters_top_n`, `damco_position_change` (our own SERP positions changing)
 2. **⚠️ Competitor entries & exits** — `new_entrant`, `drop_out` (top-10 churn)
 3. **📊 Position movements** — `position_gain`, `position_drop` (competitors moving ≥3 positions)
-4. **Threat-tier changes & first sightings** — `threat_tier_changed` (especially promotions to `primary`), `first_seen_anywhere`
-5. **SERP feature changes** — `serp_feature_appeared`/`_disappeared` (AI Overview, featured snippet, etc.)
+4. **SERP feature changes** — `serp_feature_appeared`/`_disappeared` (AI Overview, featured snippet, etc.)
+5. **Threat-tier changes & first sightings** — `threat_tier_changed` (especially promotions to `primary`), `first_seen_anywhere`
+6. **❓ Unrecognised event types** — anything matching no bucket above
+
+### The "Unrecognised event types" section
+
+Unknown types were always routed to a catch-all bucket, but nothing rendered it — they were counted in the summary totals and then vanished from the body. A digest reporting "12 critical events" and listing none of them is worse than one that admits it doesn't recognise the type.
+
+The section lists date, severity, keyword, competitor and the raw `event_type` (first 50, with a "N more" row). **If it is ever non-empty, that is a signal, not decoration:** a producer has added or renamed an event type. Fix it by teaching `group_by_section` about the new type — not by removing the section.
 
 ### "Since when" resolution
 
@@ -526,7 +582,13 @@ This means a recurring schedule produces a non-overlapping digest each cycle.
 
 ### LLM editorial summary (optional)
 
-`--with-narrative` adds a 2-3 sentence "what happened" paragraph + 3 tagged action bullets (URGENT / THIS WEEK / BACKLOG) at the top of the digest. Falls back to rule-based summary when ANTHROPIC_API_KEY is missing or credit exhausted.
+`--with-narrative` adds a 2-3 sentence "what happened" paragraph + 3 tagged action bullets (URGENT / THIS WEEK / BACKLOG) at the top of the digest. Model = `CLAUDE_MODEL_DEFAULT`; brand identity enters via `system_preamble()` as `system=`, not the user prompt. Falls back to rule-based summary when ANTHROPIC_API_KEY is missing or credit exhausted.
+
+**Per-competitor rollup.** The prompt no longer sees only a flat top-25 event list. It also receives a rollup — up to 12 competitors, sorted by gains + entries — where each row combines that competitor's SERP movement in the window (`gained` / `lost` / `entered` / `dropped_out`, distinct keyword count, worst severity, example keywords) with what the same competitor was doing off-SERP in the same window, read from `competitor_changes`: new pages, content updates, title rewrites.
+
+That correlation is the point of a digest. "itransition gained six positions" and "itransition gained six positions in the week it published forty new URLs" are different findings — the first is drift, the second is a coordinated push. The data always existed (the two sibling monitors write it) but a flat event list made the connection unreachable. The prompt is instructed to call it out explicitly where both sides are present.
+
+Note the dependency: the rollup is only as good as the last `competitor_monitor` / `content_monitor` run. If those haven't run in the digest window, the off-SERP columns are all zero and the narrative loses the correlation without saying so. Check with `python -m common.agents --folder competitive_intelligence` before relying on it.
 
 ### Outputs
 
@@ -567,3 +629,5 @@ python -m competitive_intelligence.event_digest --dry-run
 1. Present findings per competitor per offering — not a single giant list.
 2. Route insights to the right agent: new keywords → `keyword_intelligence/`, new platforms → `offpage_links/`, new topics → `content_operations/`.
 3. Log significant gap analysis findings to `memory/monitoring/`.
+4. Confirm the run landed before reporting numbers: `python -m common.agents --folder competitive_intelligence`.
+5. Never hardcode a domain, brand name or offering into a query you save. Read them from `tenants` / `tenant_domains` / `tenant_offerings`.

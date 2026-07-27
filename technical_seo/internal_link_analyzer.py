@@ -311,6 +311,9 @@ def find_underlinked(edges: list[tuple[str, str]],
                      pages: list[dict]) -> list[dict]:
     """Priority page_types whose inbound count is below threshold."""
     inbound_counts = Counter(tgt for _, tgt in edges)
+    # Read the policy once, not per page — profile() is cached but .policy()
+    # still walks a dict for every call.
+    thresholds = inbound_thresholds()
     out: list[dict] = []
     for p in pages:
         pt = p["page_type"]
