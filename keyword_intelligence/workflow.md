@@ -19,6 +19,9 @@ All commands run from the repo root (`damco-seo-agents/`). The Python interprete
 | "show recent runs", "what's the last run", "is anything broken" | [7. Query: agent run health](#7-query-agent-run-health) |
 | "dry run", "what would happen if", "test without writing" | [8. Dry run](#8-dry-run) |
 | User provides an Excel and asks to import keywords | [9. Ad-hoc data import](#9-ad-hoc-data-import) |
+| "find new keywords", "what's trending", "new buzz phrases", "what is the industry talking about", "emerging terms" | [10. Trend discovery](#10-trend-discovery) |
+| "review the candidates", "approve these keywords", "add the trending ones to tracking" | [11. Review and promote candidates](#11-review-and-promote-candidates) |
+| "a feed is broken", "add a source", "stop polling X" | [12. Maintain the source registry](#12-maintain-the-source-registry) |
 | Anything else | Ask one clarifying question, then map to the closest section above |
 
 ---
@@ -375,6 +378,167 @@ Never rely on "it'll get overwritten on re-import" — ON CONFLICT only handles 
 1. Verify row counts with a `SELECT count(*)` query.
 2. Summarize what was added (by offering, by executive).
 3. Tell the user, but don't commit the loader.
+
+---
+
+## 10. Trend discovery
+
+**When:** the user asks what's trending, wants new keyword ideas, or asks what the industry is talking about that we don't track.
+
+**What it does:** polls ~41 registered feeds (tech press, practitioner communities, Medium tag feeds), extracts recurring phrases, drops what we already track, classifies each into an offering, prices it against Google Ads Keyword Planner, and scores it. Results land in `keyword_candidates` — **never** in `keywords`.
+
+**Cost:** ~$0.05 per run (one Keyword Planner batch covers up to 1,000 keywords) plus a few cents of Claude Haiku classification. Feeds are free. Well under the $1 confirmation threshold — just run it.
+
+**Runtime:** ~4-5 minutes. Most of it is polite rate limiting, Reddit especially (12s between subreddits, ~2.5 min for the 13 of them).
+
+```bash
+# Standard run — 14-day lookback
+python -m keyword_intelligence.trend_scout
+
+# Wider net when the last run found little
+python -m keyword_intelligence.trend_scout --days 30
+
+# Only sources tied to one offering
+python -m keyword_intelligence.trend_scout --offering AI
+
+# Free preview — no writes, no paid lookups
+python -m keyword_intelligence.trend_scout --dry-run
+
+# Skip the paid volume lookup but still write candidates
+python -m keyword_intelligence.trend_scout --no-volume
+
+# Token rules only, no Claude
+python -m keyword_intelligence.trend_scout --no-llm
+```
+
+**Cadence:** weekly or fortnightly. Daily is supported and cheap, but a 14-day window won't shift much day to day.
+
+**Reading the output.** Five sub-scores roll into `trend_score`:
+
+| Component | Weight | Question it answers |
+|---|---:|---|
+| Buzz | 30 | Is the industry talking about it, across more than one outlet? |
+| Volume | 25 | Does anyone search it? |
+| Momentum | 20 | Is that demand rising? (last 3 months vs prior 9) |
+| Opportunity | 15 | Is it new territory, or a rewording of something we track? |
+| Commercial | 10 | Would the traffic be worth anything? |
+
+**Momentum is the column that matters most.** A 720/mo keyword at 4.29× is a better bet than a 40,000/mo keyword at 0.9× — the first is becoming a market, the second already is one and is fully contested.
+
+**Things that will look wrong but aren't:**
+
+- **Most candidates are AI.** That's what the industry is publishing about. The "By Offering" sheet shows the distribution honestly; use `--offering` to dig into a quieter area.
+- **A second run the same day finds few new mentions.** Correct — mentions are deduped by content hash. Scoring still runs over the full rolling window, so the candidate list stays stable rather than collapsing to near-empty.
+- **Implausibly large search volumes** (e.g. "frontier ai" at 2.2M/mo). Keyword Planner groups close variants and this is its own number, reported faithfully. Sanity-check anything above ~500k before promoting it.
+- **`suggested_offering` is sometimes wrong** on generically-worded phrases. Confidence is recorded (`offering_confidence`); rule matches score 0.75, source hints 0.50. Fix it in the review step, not by editing code.
+
+---
+
+## 11. Review and promote candidates
+
+**When:** after a discovery run, or when the user asks to add trending keywords to tracking.
+
+**This is a human gate. Never promote without the user explicitly choosing the keywords.** Every promoted keyword adds recurring DataForSEO cost to every future rank-tracker run — 2,126 keywords already cost ~$9.90 per full run.
+
+**Step 1 — show the queue:**
+
+```bash
+python -m keyword_intelligence.trend_scout --list-candidates --min-score 60 --limit 40
+```
+
+Or in SQL, for the richer view:
+
+```sql
+SELECT * FROM v_trend_review_queue LIMIT 40;
+```
+
+**Step 2 — let the user pick.** Present the list with volume and momentum. Do not pre-select for them.
+
+**Step 3 — record the decision:**
+
+```sql
+UPDATE keyword_candidates
+   SET status = 'approved', reviewed_by = '<name>', reviewed_at = now()
+ WHERE id IN (2, 4, 83);
+
+-- Rejecting is equally valuable — a rejected candidate stays rejected
+-- across all future runs instead of resurfacing every week.
+UPDATE keyword_candidates
+   SET status = 'rejected', reviewed_by = '<name>', reviewed_at = now(),
+       review_note = 'too broad / already covered by <keyword>'
+ WHERE id IN (7, 13);
+```
+
+**Step 4 — promote:**
+
+```bash
+# Preview
+python -m keyword_intelligence.trend_scout --promote --ids 2,4,83 --dry-run
+
+# Execute
+python -m keyword_intelligence.trend_scout --promote --ids 2,4,83
+```
+
+Promotion inserts into `keywords` with `ON CONFLICT (keyword, offering) DO NOTHING`. A candidate that already exists is marked `duplicate` and linked to the existing row — nothing is overwritten.
+
+**Step 5 — the promoted keywords have no `target_url` and no executive.** Set both before the next tracking run:
+
+```sql
+UPDATE keywords SET target_url = '<url>' WHERE id = <id>;
+INSERT INTO executive_keyword_assignments (executive_id, keyword_id) VALUES (<exec>, <id>);
+```
+
+**Step 6 — get a first ranking:**
+
+```bash
+python -m keyword_intelligence.rank_tracker --offering "<offering>" --all
+```
+
+---
+
+## 12. Maintain the source registry
+
+**When:** a run reports failing sources, or the user wants to add/remove a feed.
+
+The harvester prints a warning for any enabled source with 3+ consecutive failures. Act on it — a silently dead feed becomes a blind spot in one offering while the run still reports "success".
+
+```sql
+-- Health check
+SELECT name, category, last_status, consecutive_failures,
+       substr(last_error, 1, 80) AS err, last_polled_at
+  FROM trend_sources
+ WHERE enabled AND last_status <> 'ok'
+ ORDER BY consecutive_failures DESC;
+```
+
+**Reading the statuses:**
+
+| Status | Meaning | Action |
+|---|---|---|
+| `ok` | Items returned | None |
+| `empty` | Fetched fine, nothing inside the lookback window | Usually fine — a low-volume blog. Investigate if it persists for weeks. |
+| `error` | Network failure or malformed XML | One retry already happened. Persistent = the feed moved; find the new URL. |
+| `blocked` | HTTP 403/429 | 403 means the origin refuses our User-Agent — retire and replace. 429 means we're polling too fast — that's a code fix in `common/connectors/feeds.py`, not a registry fix. |
+
+**Add a source** (no code change needed — the registry is data):
+
+```sql
+INSERT INTO trend_sources (name, url, source_type, category, offering_hint, weight)
+VALUES ('Feed name', 'https://example.com/feed/', 'rss', 'tech_press', 'Cloud', 1.10);
+```
+
+- `source_type`: `rss` (also covers Atom and Medium tag feeds), `reddit`, `hackernews`
+- `category`: `tech_press`, `community`, `blog_platform`, `vendor_blog` — drives the category-spread bonus in scoring
+- `offering_hint`: optional; biases classification when token rules can't place a phrase
+- `weight`: 0.5–1.5 editorial trust multiplier
+
+**Verify a new URL before inserting it.** A feed that answers with HTML is reported as an error, but it's cheaper to check first than to discover it a week later.
+
+**Retire a source** — disable, don't delete. `trend_mentions` references it, and the evidence behind already-scored candidates should stay readable:
+
+```sql
+UPDATE trend_sources SET enabled = FALSE, last_error = '<why>' WHERE name = '...';
+```
 
 ---
 

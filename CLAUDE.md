@@ -14,7 +14,7 @@ For the full architecture see the `Damco_SEO_AI_Agent_Architecture` document (st
 
 | Folder | Domain | Phase | Status |
 |---|---|---|---|
-| `keyword_intelligence/` | Keyword rank tracking (DataForSEO + GSC dual-lens) | 1–2 | **Active** |
+| `keyword_intelligence/` | Keyword rank tracking (DataForSEO + GSC dual-lens) + trend discovery | 1–2 | **Active** |
 | `technical_seo/` | Site audits, Core Web Vitals, internal linking, sitemap/robots validation | 1 | Planned |
 | `offpage_links/` | Backlink tracking, platform discovery, outreach drafting | 1–3 | Planned |
 | `content_operations/` | Content briefs, compliance checks, glossary gaps | 2 | Planned |
@@ -31,6 +31,7 @@ When the user's request is ambiguous, use this table to decide which sub-agent s
 | User intent | Agent |
 |---|---|
 | "track rankings", "update keyword positions", "GSC data", "striking distance", "report for executives" | `keyword_intelligence/` |
+| "new keywords", "what's trending", "buzz phrases", "emerging terms", "what is the industry talking about", "search volume for X" | `keyword_intelligence/` (trend_scout) |
 | "site audit", "broken links", "CWV", "core web vitals", "sitemap issues", "canonical problems", "internal links" | `technical_seo/` |
 | "backlinks", "outreach", "guest posts", "platform opportunities" | `offpage_links/` |
 | "content brief", "compliance check", "glossary coverage", "new page content plan" | `content_operations/` |

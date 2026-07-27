@@ -9,8 +9,21 @@ Endpoints wrapped
 -----------------
   get_serp_rankings(keywords, **opts)     — SERP/Google/Organic
   get_keyword_data(keywords, **opts)      — Keyword research (SV, KD, CPC)
+  get_search_volume(keywords, **opts)     — Keyword Planner SV + 12-month trend
+  get_keyword_ideas(seeds, **opts)        — Keyword Planner "ideas" expansion
   get_backlinks(target, **opts)           — Backlinks for a domain or URL
   get_onpage_audit(target, **opts)        — On-page SEO audit
+
+A note on "Google Ads Keyword Planner"
+--------------------------------------
+The `/keywords_data/google_ads/*` endpoints are DataForSEO's proxy of the
+real Google Ads Keyword Planner API — same underlying numbers, same
+`monthly_searches` arrays, without needing a Google Ads developer token
+(which requires an approved MCC account and a manual review that takes
+days to weeks). Callers wanting Keyword Planner data should use
+get_search_volume() here rather than standing up a separate Google Ads
+client. If a native Google Ads path is ever added, it belongs behind the
+same function signature so agent code doesn't change.
 
 Queue selection
 ---------------
@@ -408,6 +421,149 @@ def get_keyword_data(keywords: Iterable[str], location_code: int | None = None,
     return out
 
 
+# Google Ads Keyword Planner accepts up to 1000 keywords per request.
+KEYWORD_PLANNER_BATCH_SIZE = 1000
+# Observed pricing 2026-07: $0.05 per keywords_data/google_ads task,
+# independent of how many keywords are in the batch. Batching matters.
+COST_PER_KEYWORD_PLANNER_TASK = 0.05
+
+
+def get_search_volume(
+    keywords: Iterable[str],
+    location_code: int | None = None,
+    language_code: str | None = None,
+) -> list[dict]:
+    """
+    Google Ads Keyword Planner volume, CPC, competition, and 12-month trend.
+
+    Richer than get_keyword_data(): keeps the `monthly_searches` array and
+    the numeric `competition_index`, which is what trend analysis needs —
+    a flat 500/mo keyword and a 500/mo keyword that was 50/mo last quarter
+    look identical without it.
+
+    Batches internally (1000 keywords/request, the API cap), so callers can
+    pass an arbitrarily long list. Keywords the Planner has no data for are
+    returned with search_volume=None rather than dropped, so the caller can
+    tell "no data" apart from "not asked".
+
+    Returns a list of dicts:
+        {
+            "keyword": "agentic ai platform",
+            "search_volume": 1900,
+            "cpc": 12.44,
+            "competition": "HIGH",           # LOW | MEDIUM | HIGH | None
+            "competition_index": 78,         # 0-100
+            "low_top_of_page_bid": 4.10,
+            "high_top_of_page_bid": 18.90,
+            "monthly_searches": [{"year": 2026, "month": 6, "search_volume": 2400}, ...],
+            "source": "dataforseo_google_ads",
+            "raw": <full result block>,
+        }
+    """
+    keywords = [k for k in (kw.strip() for kw in keywords) if k]
+    if not keywords:
+        return []
+
+    location_code = location_code or settings.DATAFORSEO_LOCATION_CODE
+    language_code = language_code or settings.DATAFORSEO_LANGUAGE_CODE
+
+    out: list[dict] = []
+    for start in range(0, len(keywords), KEYWORD_PLANNER_BATCH_SIZE):
+        batch = keywords[start:start + KEYWORD_PLANNER_BATCH_SIZE]
+        payload = [{
+            "keywords":      batch,
+            "location_code": location_code,
+            "language_code": language_code,
+        }]
+        data = _post("/keywords_data/google_ads/search_volume/live", payload)
+
+        for task in data.get("tasks", []):
+            if task.get("status_code") != OK_STATUS_CODE:
+                logger.warning("search_volume task returned status=%s message=%r",
+                               task.get("status_code"), task.get("status_message"))
+                continue
+            for result in task.get("result") or []:
+                out.append(_parse_keyword_planner_result(result))
+
+        logger.info("Keyword Planner: batch of %d keyword(s), %d result(s) so far",
+                    len(batch), len(out))
+
+    return out
+
+
+def get_keyword_ideas(
+    seed_keywords: Iterable[str],
+    location_code: int | None = None,
+    language_code: str | None = None,
+    limit: int = 200,
+) -> list[dict]:
+    """
+    Expand seed keywords into related Keyword Planner suggestions.
+
+    Google Ads caps the seed list at 20 per request. Same result shape as
+    get_search_volume(), so scoring code can treat both identically.
+
+    Useful as a second discovery lane: the feed harvest finds the phrase
+    people are *talking about*, this finds the phrases people are
+    *searching for* around it.
+    """
+    seeds = [k for k in (kw.strip() for kw in seed_keywords) if k][:20]
+    if not seeds:
+        return []
+
+    payload = [{
+        "keywords":            seeds,
+        "location_code":       location_code or settings.DATAFORSEO_LOCATION_CODE,
+        "language_code":       language_code or settings.DATAFORSEO_LANGUAGE_CODE,
+        "limit":               limit,
+        # Exclude terms with no volume — a suggestion nobody searches for
+        # is noise in a discovery pipeline.
+        "search_partners":     False,
+        "include_adult_keywords": False,
+    }]
+    data = _post("/keywords_data/google_ads/keywords_for_keywords/live", payload)
+
+    out: list[dict] = []
+    for task in data.get("tasks", []):
+        if task.get("status_code") != OK_STATUS_CODE:
+            logger.warning("keyword_ideas task returned status=%s message=%r",
+                           task.get("status_code"), task.get("status_message"))
+            continue
+        for result in task.get("result") or []:
+            out.append(_parse_keyword_planner_result(result))
+    return out
+
+
+def _parse_keyword_planner_result(result: dict) -> dict:
+    """Normalize one Keyword Planner result block. Shared by both callers."""
+    monthly = result.get("monthly_searches") or []
+    return {
+        "keyword":               result.get("keyword"),
+        "search_volume":         result.get("search_volume"),
+        "cpc":                   result.get("cpc"),
+        "competition":           result.get("competition"),
+        "competition_index":     result.get("competition_index"),
+        "low_top_of_page_bid":   result.get("low_top_of_page_bid"),
+        "high_top_of_page_bid":  result.get("high_top_of_page_bid"),
+        # Keyword Planner returns newest-first; normalize to chronological
+        # so downstream slicing ("last 3 months") reads naturally.
+        "monthly_searches": sorted(
+            [
+                {
+                    "year":          m.get("year"),
+                    "month":         m.get("month"),
+                    "search_volume": m.get("search_volume"),
+                }
+                for m in monthly
+                if m.get("year") and m.get("month")
+            ],
+            key=lambda m: (m["year"], m["month"]),
+        ),
+        "source": "dataforseo_google_ads",
+        "raw":    result,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Backlinks
 # ---------------------------------------------------------------------------
@@ -497,8 +653,14 @@ def get_onpage_audit(target: str, max_crawl_pages: int = 100) -> dict:
 
 __all__ = [
     "DataForSEOError",
+    "DataForSEOAccessDenied",
+    "COST_PER_KEYWORD_PLANNER_TASK",
+    "KEYWORD_PLANNER_BATCH_SIZE",
+    "drain_ready_serp_tasks",
     "get_serp_rankings",
     "get_keyword_data",
+    "get_search_volume",
+    "get_keyword_ideas",
     "get_backlinks",
     "get_onpage_audit",
 ]
