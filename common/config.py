@@ -82,6 +82,11 @@ class Settings:
     # PageSpeed
     PAGESPEED_API_KEY: str
 
+    # Google Analytics 4 (optional). Unset means the behaviour tiles stay empty
+    # and ga4_sync no-ops; nothing else is affected.
+    GA4_PROPERTY_ID: str
+    GA4_SERVICE_ACCOUNT_FILE: str
+
     # Anthropic
     ANTHROPIC_API_KEY: str
     CLAUDE_MODEL_CHEAP: str
@@ -129,6 +134,9 @@ def _load() -> Settings:
         GSC_SITE_URL=_optional("GSC_SITE_URL"),
 
         PAGESPEED_API_KEY=_optional("PAGESPEED_API_KEY"),
+
+        GA4_PROPERTY_ID=_optional("GA4_PROPERTY_ID"),
+        GA4_SERVICE_ACCOUNT_FILE=_optional("GA4_SERVICE_ACCOUNT_FILE"),
 
         VOYAGE_API_KEY=_optional("VOYAGE_API_KEY"),
 

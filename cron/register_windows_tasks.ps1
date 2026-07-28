@@ -58,6 +58,7 @@ if (-not (Test-Path $RepoRoot)) { throw "Repo not found at: $RepoRoot" }
 $jobs = @(
     # Daily. Free feeds plus one Keyword Planner batch (~$0.05).
     @{ Name = 'trend_scout';            Module = 'keyword_intelligence.trend_scout';            Sc = 'DAILY';   Day = $null;    Time = '02:15' }
+    @{ Name = 'ga4_sync';               Module = 'keyword_intelligence.ga4_sync';               Sc = 'DAILY';   Day = $null;    Time = '02:45' }
 
     # Weekly. All free.
     @{ Name = 'competitor_monitor';     Module = 'competitive_intelligence.competitor_monitor'; Sc = 'WEEKLY';  Day = 'MON';    Time = '02:30' }
@@ -181,11 +182,13 @@ foreach ($job in $jobs) {
     $inner = 'cd /d "{0}" && "{1}" -m {2} >> "{3}" 2>&1' -f $RepoRoot, $Python, $job.Module, $log
     $tr    = 'cmd /c {0}' -f $inner
 
-    $args = @('/Create', '/TN', $tn, '/TR', $tr, '/SC', $job.Sc, '/ST', $job.Time, '/F')
-    if ($job.Day) { $args += @('/D', $job.Day) }
+    # Not $args — that is a PowerShell automatic variable and assigning to it
+    # has side effects on how the enclosing scope sees its own arguments.
+    $taskArgs = @('/Create', '/TN', $tn, '/TR', $tr, '/SC', $job.Sc, '/ST', $job.Time, '/F')
+    if ($job.Day) { $taskArgs += @('/D', $job.Day) }
 
     if ($PSCmdlet.ShouldProcess($tn, "Register $($job.Sc) $($job.Day) at $($job.Time)")) {
-        & schtasks.exe @args | Out-Null
+        & schtasks.exe @taskArgs | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "schtasks failed for $tn (exit $LASTEXITCODE)" }
         Write-Host ("  registered  {0,-24} {1,-8} {2,-6} {3}" -f $job.Name, $job.Sc, $job.Day, $job.Time)
     } else {

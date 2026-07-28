@@ -150,6 +150,22 @@ CATALOGUE: tuple[AgentSpec, ...] = (
               "in the workbook is calculated in Python. --no-narrative skips it.",
     ),
     AgentSpec(
+        name="keyword_intelligence.ga4_sync",
+        title="GA4 Sync",
+        kind="deterministic",
+        summary="Pulls GA4 landing-page and channel behaviour into Postgres so "
+                "the dashboard can read it without calling Google.",
+        reads=("pages",),
+        writes=("ga4_landing_pages", "ga4_channel_totals"),
+        cadence_days=1,
+        blocked_by=None,
+        notes="Closes the loop GSC cannot: GSC says we rank and got clicks, only "
+              "GA4 says whether that traffic converted. Skips cleanly when "
+              "GA4_PROPERTY_ID is unset. Landing pages that match no `pages` row "
+              "are left unattributed rather than guessed — a wrong join would "
+              "credit one offering's conversions to another.",
+    ),
+    AgentSpec(
         name="keyword_intelligence.trend_scout",
         title="Trend Scout",
         kind="ai_assisted",

@@ -52,6 +52,12 @@ MAILTO=""
 # Trend discovery. Free feeds + one Keyword Planner batch (~$0.05).
 15 2 * * *   cd $REPO && $PY -m keyword_intelligence.trend_scout >> logs/trend_scout.log 2>&1
 
+# GA4 behaviour metrics. Free, quota'd per property. Runs daily because the
+# dashboard's conversion tiles are the ones people refresh; the window itself
+# is 28 days rolling, so a missed day costs nothing. Skips cleanly when
+# GA4_PROPERTY_ID is unset.
+45 2 * * *   cd $REPO && $PY -m keyword_intelligence.ga4_sync >> logs/ga4_sync.log 2>&1
+
 # ---------------------------------------------------------------------------
 # Weekly
 # ---------------------------------------------------------------------------
