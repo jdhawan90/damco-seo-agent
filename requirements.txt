@@ -18,6 +18,16 @@ lxml>=5.1.0
 # ---- Reporting -------------------------------------------------------------
 openpyxl>=3.1.2                # Excel report generation
 
+# ---- Dashboard (dashboard/) ------------------------------------------------
+# Only needed to serve the dashboard; the agents themselves never import these.
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+
+# ---- Embeddings (optional) -------------------------------------------------
+# Semantic near-duplicate detection in trend_scout. Unset VOYAGE_API_KEY and the
+# code falls back to token matching, so this is genuinely optional.
+voyageai>=0.2.3
+
 # ---- Development -----------------------------------------------------------
 # Kept here rather than a separate dev-requirements to keep setup one-step.
 pytest>=8.0.0

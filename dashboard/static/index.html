@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SEO Health</title>
+<style>
+/* ---------------------------------------------------------------------------
+   Tokens. Values from the data-viz reference palette; the ordinal ramp below
+   was validated with scripts/validate_palette.js --ordinal in both modes
+   (all checks pass: monotone lightness, adjacent dL >= 0.06, light end clears
+   the surface, single hue).
+   Dark values are declared under both the media query and the data-theme
+   scope so the viewer's toggle wins in either direction.
+--------------------------------------------------------------------------- */
+:root {
+  color-scheme: light;
+  --page:        #f9f9f7;
+  --surface:     #fcfcfb;
+  --ink:         #0b0b0b;
+  --ink-2:       #52514e;
+  --muted:       #898781;
+  --grid:        #e1e0d9;
+  --axis:        #c3c2b7;
+  --hairline:    rgba(11,11,11,0.10);
+
+  --series-1:    #2a78d6;
+
+  /* ordinal ramp, best -> worst position */
+  --ord-1: #104281;
+  --ord-2: #1c5cab;
+  --ord-3: #2a78d6;
+  --ord-4: #5598e7;
+  --ord-5: #86b6ef;
+  --ord-none: #c3c2b7;   /* absence of a position is not a weaker position */
+
+  --good:      #0ca30c;
+  --warning:   #fab219;
+  --serious:   #ec835a;
+  --critical:  #d03b3b;
+  --delta-good:#006300;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page:     #0d0d0d;
+    --surface:  #1a1a19;
+    --ink:      #ffffff;
+    --ink-2:    #c3c2b7;
+    --muted:    #898781;
+    --grid:     #2c2c2a;
+    --axis:     #383835;
+    --hairline: rgba(255,255,255,0.10);
+    --series-1: #3987e5;
+    --ord-1: #9ec5f4; --ord-2: #6da7ec; --ord-3: #3987e5;
+    --ord-4: #256abf; --ord-5: #184f95; --ord-none: #383835;
+    --delta-good: #0ca30c;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page:     #0d0d0d;
+  --surface:  #1a1a19;
+  --ink:      #ffffff;
+  --ink-2:    #c3c2b7;
+  --muted:    #898781;
+  --grid:     #2c2c2a;
+  --axis:     #383835;
+  --hairline: rgba(255,255,255,0.10);
+  --series-1: #3987e5;
+  --ord-1: #9ec5f4; --ord-2: #6da7ec; --ord-3: #3987e5;
+  --ord-4: #256abf; --ord-5: #184f95; --ord-none: #383835;
+  --delta-good: #0ca30c;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--page); color: var(--ink);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1280px; margin: 0 auto; padding: 24px 24px 72px; }
+
+/* header */
+header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 6px; }
+h1 { font-size: 1.32rem; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+.sub { color: var(--ink-2); font-size: 0.86rem; margin: 0 0 22px; }
+.spacer { margin-left: auto; }
+button.ghost {
+  background: var(--surface); color: var(--ink-2); border: 1px solid var(--hairline);
+  border-radius: 6px; padding: 6px 11px; font: inherit; font-size: 0.82rem; cursor: pointer;
+}
+button.ghost:hover { color: var(--ink); }
+
+/* cards */
+.card {
+  background: var(--surface); border: 1px solid var(--hairline);
+  border-radius: 8px; padding: 18px 20px;
+}
+.grid { display: grid; gap: 14px; }
+.g-hero  { grid-template-columns: minmax(260px, 1.1fr) minmax(320px, 2fr); }
+.g-tiles { grid-template-columns: repeat(auto-fit, minmax(178px, 1fr)); }
+.g-two   { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+.mt { margin-top: 14px; }
+
+/* card chrome */
+.card h2 {
+  font-size: 0.7rem; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--muted); margin: 0 0 2px;
+}
+.card .note { font-size: 0.78rem; color: var(--muted); margin: 0 0 14px; }
+.stamp { font-size: 0.7rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.stamp.warn { color: var(--warning); }
+.stamp.bad  { color: var(--critical); }
+
+/* figures. Proportional figures on big numbers, never tabular-nums. */
+.hero-fig { font-size: 3.6rem; font-weight: 650; line-height: 1; letter-spacing: -0.025em; }
+.tile-val { font-size: 1.72rem; font-weight: 650; line-height: 1.1; }
+.tile-lbl { font-size: 0.76rem; color: var(--ink-2); }
+.delta { font-size: 0.82rem; font-weight: 600; }
+.delta.up   { color: var(--delta-good); }
+.delta.down { color: var(--critical); }
+.delta.flat { color: var(--muted); }
+
+/* bars */
+.bar-row { display: grid; grid-template-columns: 82px 1fr 84px; align-items: center; gap: 10px; margin-bottom: 7px; }
+.bar-lbl { font-size: 0.79rem; color: var(--ink-2); }
+.bar-track { height: 18px; position: relative; }
+.bar-fill {
+  height: 100%; border-radius: 0 4px 4px 0;   /* rounded data-end, square at baseline */
+  min-width: 2px; transition: width .25s ease;
+}
+.bar-num { font-size: 0.79rem; color: var(--ink-2); text-align: right; font-variant-numeric: tabular-nums; }
+/* Threshold rule on a bar track. A hairline in the ink colour, not a series
+   hue — it is a reference line, not data. */
+.bar-mark {
+  position: absolute; top: -2px; bottom: -2px; width: 2px;
+  background: var(--ink-2); opacity: .65;
+}
+
+/* status */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 0.7rem; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase;
+}
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+
+/* tables — the WCAG-clean twin of every chart */
+table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+th {
+  text-align: left; font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--muted); font-weight: 650; padding: 6px 8px; border-bottom: 1px solid var(--grid);
+  white-space: nowrap;
+}
+td { padding: 6px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.scroll { overflow-x: auto; }
+details.tv { margin-top: 12px; }
+details.tv summary {
+  font-size: 0.74rem; color: var(--muted); cursor: pointer; list-style: none;
+}
+details.tv summary::-webkit-details-marker { display: none; }
+details.tv summary::before { content: "▸ "; }
+details.tv[open] summary::before { content: "▾ "; }
+
+/* trend chart */
+svg { display: block; width: 100%; height: auto; overflow: visible; }
+.tt {
+  position: fixed; pointer-events: none; opacity: 0; transition: opacity .1s;
+  background: var(--surface); border: 1px solid var(--hairline); border-radius: 6px;
+  padding: 7px 10px; font-size: 0.78rem; box-shadow: 0 4px 14px rgba(0,0,0,.14);
+  z-index: 40; max-width: 240px;
+}
+.tt .k { color: var(--muted); font-size: 0.7rem; }
+.err { color: var(--critical); font-size: 0.82rem; }
+.loading { color: var(--muted); padding: 40px 0; text-align: center; }
+:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@media (max-width: 760px) { .g-hero { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 id="title">SEO Health</h1>
+    <span class="spacer"></span>
+    <button class="ghost" id="theme">Theme</button>
+    <button class="ghost" id="refresh">Refresh</button>
+  </header>
+  <p class="sub" id="subtitle">Loading…</p>
+  <div id="root"><p class="loading">Reading the database…</p></div>
+</div>
+<div class="tt" id="tt"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const tt = $('#tt');
+
+const fmt = (n) => n === null || n === undefined ? '—' : n.toLocaleString();
+const compact = (n) => {
+  if (n === null || n === undefined) return '—';
+  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (Math.abs(n) >= 1e4) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+  return n.toLocaleString();
+};
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+/* Freshness. Every tile shows one; thresholds scale off the agent's cadence
+   where we know it, otherwise a flat 21/45 days. A number that looks current
+   but is eleven weeks old is the failure mode this exists to prevent. */
+function stamp(t, warnAt = 21, badAt = 45) {
+  if (!t || t.as_of == null) return '<span class="stamp">no data</span>';
+  const d = t.stale_days;
+  const cls = d >= badAt ? 'stamp bad' : d >= warnAt ? 'stamp warn' : 'stamp';
+  const age = d === 0 ? 'today' : d === 1 ? 'yesterday' : `${d} days ago`;
+  return `<span class="${cls}" title="as of ${t.as_of}">${age}</span>`;
+}
+
+function deltaHtml(v, unit = 'pts', goodUp = true) {
+  if (v === null || v === undefined) return '<span class="delta flat">no comparison</span>';
+  if (v === 0) return '<span class="delta flat">no change</span>';
+  const up = v > 0;
+  const cls = (up === goodUp) ? 'up' : 'down';
+  return `<span class="delta ${cls}">${up ? '▲' : '▼'} ${Math.abs(v)} ${unit}</span>`;
+}
+
+function tvTable(cols, rows, mapper) {
+  if (!rows || !rows.length) return '<p class="note">Nothing to show.</p>';
+  const head = cols.map(c => `<th${c.num ? ' class="num"' : ''}>${esc(c.label)}</th>`).join('');
+  const body = rows.map(r => '<tr>' + mapper(r).map(
+    (v, i) => `<td${cols[i].num ? ' class="num"' : ''}>${v}</td>`).join('') + '</tr>').join('');
+  return `<div class="scroll"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+/* --------------------------------------------------------------------------
+   Trend chart. Single series, so no legend — the card title names it.
+   2px line, >=8px end marker with a 2px surface ring, hairline solid grid,
+   one axis. Crosshair + tooltip on hover; values also in the table view, so
+   the tooltip enhances and never gates.
+-------------------------------------------------------------------------- */
+function trendSvg(points) {
+  if (!points || points.length < 2) return '<p class="note">Need at least two cycles to draw a trend.</p>';
+  const W = 640, H = 190, L = 38, R = 52, T = 14, B = 30;
+  const pw = W - L - R, ph = H - T - B;
+  // Round the domain outward to clean tick values. Ticks of 9% / 18% / 28%
+  // are arithmetically correct and unreadable; a reader should not have to
+  // interpolate against arbitrary numbers.
+  const ys = points.map(p => p.pct);
+  const rawLo = Math.min(...ys), rawHi = Math.max(...ys);
+  const step = (rawHi - rawLo) <= 12 ? 5 : 10;
+  const lo = Math.max(0, Math.floor((rawLo - step / 2) / step) * step);
+  const hi = Math.ceil((rawHi + step / 2) / step) * step;
+  const x = i => L + (points.length === 1 ? pw / 2 : (i * pw) / (points.length - 1));
+  const y = v => T + ph - ((v - lo) / (hi - lo || 1)) * ph;
+
+  const tickVals = [];
+  for (let v = lo; v <= hi + 0.001; v += step) tickVals.push(v);
+  const ticks = tickVals.map(v => `
+    <line x1="${L}" y1="${y(v)}" x2="${W - R}" y2="${y(v)}" stroke="var(--grid)" stroke-width="1"/>
+    <text x="${L - 8}" y="${y(v) + 4}" text-anchor="end" font-size="10"
+          fill="var(--muted)" style="font-variant-numeric:tabular-nums">${v}%</text>`).join('');
+
+  const path = points.map((p, i) => `${i ? 'L' : 'M'}${x(i)},${y(p.pct)}`).join(' ');
+  const last = points.length - 1;
+  const hits = points.map((p, i) => `
+    <circle cx="${x(i)}" cy="${y(p.pct)}" r="14" fill="transparent"
+            data-i="${i}" class="hit" tabindex="0" role="img"
+            aria-label="${esc(p.label)}: ${p.pct}% of ${p.measured} keywords"/>`).join('');
+  const xlabels = points.map((p, i) =>
+    (i === 0 || i === last || points.length <= 5)
+      ? `<text x="${x(i)}" y="${H - 8}" text-anchor="middle" font-size="10" fill="var(--muted)">${esc(p.label.slice(5))}</text>`
+      : '').join('');
+
+  return `<svg viewBox="0 0 ${W} ${H}" role="group" aria-label="Visibility trend">
+    ${ticks}
+    <line x1="${L}" y1="${T + ph}" x2="${W - R}" y2="${T + ph}" stroke="var(--axis)" stroke-width="1"/>
+    <path d="${path}" fill="none" stroke="var(--series-1)" stroke-width="2"
+          stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${x(last)}" cy="${y(points[last].pct)}" r="5"
+            fill="var(--series-1)" stroke="var(--surface)" stroke-width="2"/>
+    <text x="${x(last) + 11}" y="${y(points[last].pct) + 4}" font-size="11"
+          font-weight="650" fill="var(--ink)">${points[last].pct}%</text>
+    ${xlabels}${hits}
+  </svg>`;
+}
+
+function bindTrend(host, points) {
+  host.querySelectorAll('.hit').forEach(el => {
+    const show = (ev) => {
+      const p = points[+el.dataset.i];
+      tt.innerHTML = `<div><strong>${esc(p.label)}</strong></div>
+        <div>${p.pct}% in top 10</div>
+        <div class="k">${fmt(p.in_top_10)} of ${fmt(p.measured)} measured${
+          p.spans_dates > 1 ? ` · run spanned ${p.spans_dates} dates` : ''}</div>`;
+      const r = el.getBoundingClientRect();
+      tt.style.left = Math.min(window.innerWidth - 250, r.left + 14) + 'px';
+      tt.style.top = (r.top - 8) + 'px';
+      tt.style.opacity = 1;
+    };
+    el.addEventListener('mouseenter', show);
+    el.addEventListener('focus', show);
+    const hide = () => { tt.style.opacity = 0; };
+    el.addEventListener('mouseleave', hide);
+    el.addEventListener('blur', hide);
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+
+function render(d) {
+  const m = d._meta || {};
+  $('#title').textContent = `${m.brand || 'SEO'} — Health`;
+  $('#subtitle').innerHTML =
+    `${esc(m.primary_domain || '')} · ${m.offerings ? m.offerings.length + ' offerings' : ''}
+     · generated ${esc((m.generated_at || '').replace('T', ' '))}
+     · <span class="stamp">tiles read the database only; nothing here calls a live API</span>`;
+
+  const v = d.visibility || {}, pd = d.position_distribution || {},
+        nm = d.net_movement || {}, gsc = d.search_console || {},
+        sd = d.striking_distance || {}, cg = d.coverage_gaps || {},
+        th = d.technical_health || {}, cwv = d.core_web_vitals || {},
+        cq = d.candidate_queue || {}, cm = d.competitor_movement || {},
+        sov = d.share_of_voice || {}, ah = d.agent_health || {},
+        cp = d.content_pipeline || {}, ra = d.run_activity || {};
+
+  const ordVar = (i, bucket) => bucket === 'not-found' ? 'var(--ord-none)' : `var(--ord-${i + 1})`;
+  const maxBucket = Math.max(1, ...(pd.buckets || []).map(b => b.count));
+
+  const statusFor = (h) => ({
+    'current': ['good', '●', 'current'], 'on demand': ['muted', '○', 'on demand'],
+    'overdue': ['critical', '▲', 'overdue'], 'never run': ['warning', '◇', 'never run'],
+    'blocked': ['serious', '■', 'blocked'],
+  }[h] || ['muted', '○', h]);
+
+  const html = `
+  <!-- HERO + TREND -->
+  <div class="grid g-hero">
+    <div class="card">
+      <h2>Visibility</h2>
+      <p class="note">Tracked keywords ranking in the top 10.</p>
+      <div class="hero-fig">${v.value != null ? v.value + '%' : '—'}</div>
+      <div class="tile-lbl mt">${fmt(v.in_top_10)} of ${fmt(v.measured)} measured · ${stamp(v)}</div>
+      <div class="mt">${deltaHtml(v.delta)}${v.delta_vs ? ` <span class="stamp">vs ${esc(v.delta_vs)}</span>` : ''}</div>
+      ${v.delta_basis ? `<p class="note mt" style="margin-bottom:0">Measured ${esc(v.delta_basis)} — not by
+        subtracting two percentages over different keyword sets.</p>` : ''}
+    </div>
+    <div class="card">
+      <h2>Visibility over time</h2>
+      <p class="note">Runs that cross midnight are merged into one cycle; the sample size is in each tooltip.</p>
+      <div id="trend">${trendSvg(v.trend)}</div>
+      <details class="tv"><summary>Table view</summary>
+        ${tvTable([{label:'Cycle'},{label:'In top 10',num:1},{label:'Measured',num:1},{label:'Share',num:1}],
+          v.trend, r => [esc(r.label), fmt(r.in_top_10), fmt(r.measured), r.pct + '%'])}
+      </details>
+    </div>
+  </div>
+
+  <!-- STAT TILES -->
+  <div class="grid g-tiles mt">
+    <div class="card">
+      <div class="tile-lbl">Net movement</div>
+      <div class="tile-val">${nm.net > 0 ? '+' : ''}${fmt(nm.net)}</div>
+      <div class="tile-lbl">${fmt(nm.improved)} up · ${fmt(nm.declined)} down</div>
+      <div class="mt">${stamp(nm)}${nm.avg_span_days ? ` <span class="stamp">· ~${nm.avg_span_days}d apart</span>` : ''}</div>
+    </div>
+    <div class="card">
+      <div class="tile-lbl">Organic clicks</div>
+      <div class="tile-val">${compact(gsc.clicks)}</div>
+      <div class="tile-lbl">${compact(gsc.impressions)} impressions · ${gsc.ctr_pct != null ? gsc.ctr_pct + '% CTR' : '—'}</div>
+      <div class="mt">${stamp(gsc)}</div>
+    </div>
+    <div class="card">
+      <div class="tile-lbl">Striking distance</div>
+      <div class="tile-val">${fmt(sd.count)}</div>
+      <div class="tile-lbl">positions 11–20${sd.with_known_volume != null ? ` · ${sd.with_known_volume} with known volume` : ''}</div>
+      <div class="mt">${stamp(sd)}</div>
+    </div>
+    <div class="card">
+      <div class="tile-lbl">Not ranking</div>
+      <div class="tile-val">${fmt(cg.total)}</div>
+      <div class="tile-lbl">${pd.total ? Math.round(100 * cg.total / pd.total) + '% of tracked' : ''}</div>
+      <div class="mt">${stamp(cg)}</div>
+    </div>
+    <div class="card">
+      <div class="tile-lbl">Candidates to review</div>
+      <div class="tile-val">${fmt(cq.awaiting_review)}</div>
+      <div class="tile-lbl">promotion is human-gated</div>
+      <div class="mt">${stamp(cq, 14, 30)}</div>
+    </div>
+  </div>
+
+  <!-- DISTRIBUTION + OFFERINGS -->
+  <div class="grid g-two mt">
+    <div class="card">
+      <h2>Where we rank</h2>
+      <p class="note">Latest cycle · ${fmt(pd.total)} keywords · ${stamp(pd)}</p>
+      ${(pd.buckets || []).map((b, i) => `
+        <div class="bar-row">
+          <div class="bar-lbl">${esc(b.bucket)}</div>
+          <div class="bar-track"><div class="bar-fill"
+            style="width:${Math.max(0.4, 100 * b.count / maxBucket)}%;background:${ordVar(i, b.bucket)}"></div></div>
+          <div class="bar-num">${fmt(b.count)} · ${b.pct}%</div>
+        </div>`).join('')}
+      <details class="tv"><summary>Table view</summary>
+        ${tvTable([{label:'Bucket'},{label:'Keywords',num:1},{label:'Share',num:1}],
+          pd.buckets, r => [esc(r.bucket), fmt(r.count), r.pct + '%'])}
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>Top-10 coverage by offering</h2>
+      <p class="note">${stamp(sov)}</p>
+      ${(sov.by_offering || []).slice(0, 9).map(o => `
+        <div class="bar-row">
+          <div class="bar-lbl" title="${esc(o.offering)}">${esc(o.offering)}</div>
+          <div class="bar-track"><div class="bar-fill"
+            style="width:${Math.max(0.4, o.pct)}%;background:var(--series-1)"></div></div>
+          <div class="bar-num">${o.in_top_10}/${o.tracked} · ${o.pct}%</div>
+        </div>`).join('')}
+      <details class="tv"><summary>Table view — all offerings</summary>
+        ${tvTable([{label:'Offering'},{label:'In top 10',num:1},{label:'Tracked',num:1},{label:'Share',num:1}],
+          sov.by_offering, r => [esc(r.offering), fmt(r.in_top_10), fmt(r.tracked), r.pct + '%'])}
+      </details>
+    </div>
+  </div>
+
+  <!-- TECHNICAL + CWV -->
+  <div class="grid g-two mt">
+    <div class="card">
+      <h2>Open technical issues</h2>
+      <p class="note">${fmt(th.open_total)} open · ${fmt(th.resolved_30d)} resolved in 30 days · ${stamp(th, 21, 45)}</p>
+      <div style="display:flex;gap:22px;flex-wrap:wrap;margin-bottom:6px">
+        ${(th.by_severity || []).map(s => {
+          const c = { critical: 'critical', high: 'serious', medium: 'warning', low: 'muted' }[s.severity];
+          return `<div>
+            <div class="pill"><span class="dot" style="background:var(--${c})"></span>${esc(s.severity)}</div>
+            <div class="tile-val" style="font-size:1.3rem">${fmt(s.count)}</div></div>`;
+        }).join('')}
+      </div>
+      <details class="tv"><summary>Table view — by type</summary>
+        ${tvTable([{label:'Issue type'},{label:'Severity'},{label:'Count',num:1}],
+          th.top_types, r => [esc(r.issue_type), esc(r.severity), fmt(r.n)])}
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>Core Web Vitals</h2>
+      <p class="note">Against this tenant's own pass marks, not Google's 90 · ${stamp(cwv, 14, 30)}</p>
+      ${(cwv.devices || []).map(x => {
+        // The pass mark is drawn on the track. Without it the bar is just a red
+        // rectangle beside "64.6 / 85" and the reader cannot see how far short
+        // it falls — which is the entire question this tile answers.
+        const passing = x.avg_score != null && x.threshold != null && x.avg_score >= x.threshold;
+        return `
+        <div class="bar-row">
+          <div class="bar-lbl">${esc(x.device)}</div>
+          <div class="bar-track">
+            <div class="bar-fill" style="width:${Math.max(0.4, x.avg_score || 0)}%;
+              background:var(--${passing ? 'good' : 'critical'})"></div>
+            ${x.threshold != null ? `<div class="bar-mark" style="left:${x.threshold}%"
+              title="pass mark ${x.threshold}"></div>` : ''}
+          </div>
+          <div class="bar-num">${x.avg_score ?? '—'} <span class="stamp">/ ${x.threshold ?? '—'}</span></div>
+        </div>`;
+      }).join('')}
+      <p class="note" style="margin:8px 0 0">The vertical rule on each track is that
+        device's pass mark. Both devices are below it.</p>
+      <details class="tv"><summary>Table view</summary>
+        ${tvTable([{label:'Device'},{label:'URLs',num:1},{label:'Avg score',num:1},{label:'Pass mark',num:1},{label:'Passing',num:1}],
+          cwv.devices, r => [esc(r.device), fmt(r.urls), r.avg_score ?? '—', r.threshold ?? '—',
+                             r.pass_pct != null ? r.pass_pct + '%' : '—'])}
+      </details>
+    </div>
+  </div>
+
+  <!-- COMPETITORS + CANDIDATES -->
+  <div class="grid g-two mt">
+    <div class="card">
+      <h2>Competitors gaining ground</h2>
+      <p class="note">Last ${cm.window_days || 30} days of SERP events · ${stamp(cm)}</p>
+      ${tvTable([{label:'Domain'},{label:'Tier'},{label:'Gains',num:1},{label:'Entries',num:1},{label:'Keywords',num:1}],
+        (cm.competitors || []).slice(0, 10),
+        r => [esc(r.competitor_domain), esc(r.threat_tier || '—'), fmt(r.gains), fmt(r.entries), fmt(r.keywords)])}
+    </div>
+    <div class="card">
+      <h2>Discovered keywords awaiting review</h2>
+      <p class="note">${fmt(cq.awaiting_review)} new · ${stamp(cq, 14, 30)}</p>
+      ${tvTable([{label:'Keyword'},{label:'Offering'},{label:'Score',num:1},{label:'Volume',num:1},{label:'Momentum',num:1}],
+        (cq.top || []).slice(0, 10),
+        r => [esc(r.keyword), esc(r.offering || '—'),
+              r.trend_score != null ? Number(r.trend_score).toFixed(1) : '—',
+              compact(r.search_volume),
+              r.momentum_ratio != null ? Number(r.momentum_ratio).toFixed(2) + '×' : '—'])}
+    </div>
+  </div>
+
+  <!-- SYSTEM HEALTH -->
+  <div class="card mt">
+    <h2>Agent health</h2>
+    <p class="note">
+      ${Object.entries(ah.summary || {}).map(([k, n]) => `${n} ${esc(k)}`).join(' · ')}
+      ${ra.totals ? ` · ${ra.totals.runs} runs in ${ra.window_days}d, ${ra.totals.failed} failed` : ''}
+      — every tile above is only as fresh as the agent that fills it.
+    </p>
+    ${tvTable([{label:'Agent'},{label:'Kind'},{label:'State'},{label:'Last run'},{label:'Status'},{label:'Blocked by'}],
+      ah.agents || [], r => {
+        const [c, icon, label] = statusFor(r.health);
+        return [
+          esc(r.name),
+          r.kind === 'ai_assisted' ? 'AI' : 'rule',
+          `<span class="pill"><span class="dot" style="background:var(--${c})"></span>${icon} ${esc(label)}</span>`,
+          esc(r.last_run || 'never'),
+          esc(r.last_status || '—'),
+          esc(r.blocked_by || ''),
+        ];
+      })}
+  </div>
+
+  <!-- ERRORS -->
+  ${Object.entries(d).filter(([, x]) => x && x.error).map(([k, x]) =>
+    `<p class="err mt">Tile <strong>${esc(k)}</strong> failed: ${esc(x.error)}</p>`).join('')}
+  `;
+
+  $('#root').innerHTML = html;
+  if (v.trend && v.trend.length > 1) bindTrend($('#trend'), v.trend);
+}
+
+async function load() {
+  const root = $('#root');
+  // Hold the previous render at reduced opacity rather than flashing a skeleton.
+  if (root.dataset.loaded) root.style.opacity = 0.55;
+  try {
+    const res = await fetch('/api/kpis');
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    render(await res.json());
+    root.dataset.loaded = '1';
+  } catch (e) {
+    root.innerHTML = `<p class="err">Could not load KPIs: ${esc(e.message)}.
+      Is the database reachable and are migrations applied? Try <code>/api/health</code>.</p>`;
+  } finally {
+    root.style.opacity = 1;
+  }
+}
+
+$('#refresh').addEventListener('click', load);
+$('#theme').addEventListener('click', () => {
+  const cur = document.documentElement.getAttribute('data-theme');
+  const dark = cur ? cur === 'dark'
+    : window.matchMedia('(prefers-color-scheme: dark)').matches;
+  document.documentElement.setAttribute('data-theme', dark ? 'light' : 'dark');
+});
+load();
+</script>
+</body>
+</html>
