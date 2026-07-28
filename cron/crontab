@@ -1,0 +1,120 @@
+# ============================================================================
+# Damco SEO Agent System — schedule
+#
+# Install:
+#   crontab cron/crontab          # replaces the current user's crontab
+#   crontab -l                    # verify
+#
+# Every line assumes the repo is at /opt/damco-seo-agents and the venv at
+# /opt/damco-seo-agents/.venv. Change REPO below if not.
+#
+# Why this file exists
+# --------------------
+# Nothing was scheduled. Every row in `agent_runs` was launched by hand, which
+# is why six agents were overdue against their own declared cadence and the
+# technical_seo data was eleven weeks old. An agent with a cadence and no
+# scheduler is a documentation claim, not a behaviour.
+#
+# Check the result rather than trusting this file:
+#   python -m common.agents          # last run + status + overdue flags
+#
+# Ordering matters
+# ----------------
+# Some agents consume another's output in the same window:
+#   rank_tracker        -> gap_analyzer, event_digest   (SERP data + events)
+#   sitemap_validator   -> site_auditor                 (populates `pages`)
+#   backlink_analyzer   -> platform_finder              (competitor_backlinks)
+# The times below leave a gap after each producer. They are not chained — a
+# producer failure leaves the consumer running on the previous cycle's data,
+# which is the right trade for a nightly batch. `agent_runs` records both.
+#
+# Cost
+# ----
+# rank_tracker is the only expensive job: ~$0.00465 per keyword on the standard
+# queue. At 2,126 keywords that is ~$9.90 per full run, so the fortnightly
+# cadence below is ~$20/month. It only queries keywords whose last snapshot is
+# older than `keywords.snapshot_frequency_days`, so a run mid-cycle is cheap.
+# Everything else here is free or fractions of a cent.
+# ============================================================================
+
+SHELL=/bin/bash
+REPO=/opt/damco-seo-agents
+PY=/opt/damco-seo-agents/.venv/bin/python
+MAILTO=""
+
+# Keep a log per agent. Rotate with logrotate; these grow slowly.
+# Format: cd first so relative paths and .env resolve.
+
+# ---------------------------------------------------------------------------
+# Daily — cheap, and the freshness the dashboard leans on
+# ---------------------------------------------------------------------------
+
+# Trend discovery. Free feeds + one Keyword Planner batch (~$0.05).
+15 2 * * *   cd $REPO && $PY -m keyword_intelligence.trend_scout >> logs/trend_scout.log 2>&1
+
+# ---------------------------------------------------------------------------
+# Weekly
+# ---------------------------------------------------------------------------
+
+# Competitor page diffs. Free (HTTP only).
+# NOTE: the first run after the content-hash change re-baselines and will
+# report unusually few changes. That is correct — see migration 016.
+30 2 * * 1   cd $REPO && $PY -m competitive_intelligence.competitor_monitor >> logs/competitor_monitor.log 2>&1
+
+# Competitor publishing (sitemap diffs). Free.
+30 3 * * 1   cd $REPO && $PY -m competitive_intelligence.content_monitor >> logs/content_monitor.log 2>&1
+
+# Core Web Vitals. PageSpeed API, free tier is generous.
+0 4 * * 2    cd $REPO && $PY -m technical_seo.cwv_monitor >> logs/cwv_monitor.log 2>&1
+
+# Weekly digest of SERP events. Runs after the Monday monitors so its
+# per-competitor rollup can correlate SERP movement with publishing.
+0 8 * * 1    cd $REPO && $PY -m competitive_intelligence.event_digest >> logs/event_digest.log 2>&1
+
+# ---------------------------------------------------------------------------
+# Fortnightly — the paid one, plus the technical sweep
+# ---------------------------------------------------------------------------
+
+# Rank tracking. THE COST CENTRE (~$9.90 full run). Chains GSC enrichment
+# automatically unless --skip-gsc. 1st and 15th at 01:00.
+0 1 1,15 * * cd $REPO && $PY -m keyword_intelligence.rank_tracker >> logs/rank_tracker.log 2>&1
+
+# Gap analysis, after rank_tracker has landed its data.
+0 6 1,15 * * cd $REPO && $PY -m competitive_intelligence.gap_analyzer >> logs/gap_analyzer.log 2>&1
+
+# Sitemap validation populates `pages`; the auditor reads it. Two hours apart.
+0 1 2,16 * * cd $REPO && $PY -m technical_seo.sitemap_validator >> logs/sitemap_validator.log 2>&1
+0 3 2,16 * * cd $REPO && $PY -m technical_seo.site_auditor >> logs/site_auditor.log 2>&1
+
+# Internal link graph. Crawls the full scope every run — no cadence filter.
+0 5 2,16 * * cd $REPO && $PY -m technical_seo.internal_link_analyzer >> logs/internal_link_analyzer.log 2>&1
+
+# ---------------------------------------------------------------------------
+# Monthly
+# ---------------------------------------------------------------------------
+
+# Glossary gaps and content-calendar concentration. Both free, both advisory.
+0 7 3 * *    cd $REPO && $PY -m content_operations.glossary_detector >> logs/glossary_detector.log 2>&1
+30 7 3 * *   cd $REPO && $PY -m content_operations.concentration_checker >> logs/concentration_checker.log 2>&1
+
+# ---------------------------------------------------------------------------
+# BLOCKED — uncomment when the DataForSEO Backlinks subscription is active
+#
+# platform_finder depends on backlink_analyzer having populated
+# competitor_backlinks, so the order below matters. vendor_scorer only has
+# something to score once outreach activity exists.
+# ---------------------------------------------------------------------------
+
+# 0 2 4 * *    cd $REPO && $PY -m competitive_intelligence.backlink_analyzer >> logs/backlink_analyzer.log 2>&1
+# 0 4 4 * *    cd $REPO && $PY -m offpage_links.backlink_tracker >> logs/backlink_tracker.log 2>&1
+# 0 6 4 * *    cd $REPO && $PY -m offpage_links.platform_finder >> logs/platform_finder.log 2>&1
+# 0 8 4 * *    cd $REPO && $PY -m offpage_links.vendor_scorer >> logs/vendor_scorer.log 2>&1
+
+# ---------------------------------------------------------------------------
+# NOT scheduled, deliberately
+# ---------------------------------------------------------------------------
+# keyword_intelligence.reports          run on demand — it is a renderer
+# content_operations.brief_generator    a human picks the keywords
+# content_operations.compliance_checker needs a submitted draft URL
+# offpage_links.outreach_drafter        drafts are human-gated
+# offpage_links.guest_post_drafter      drafts are human-gated
