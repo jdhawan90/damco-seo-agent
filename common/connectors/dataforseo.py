@@ -153,6 +153,32 @@ def _queue_path(domain: str, endpoint: str, queue: str | None) -> str:
 # SERP rankings
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# SERP result type: `advanced`, not `regular`.
+#
+# This was `regular` until 2026-07-28, and it silently cost us every SERP
+# feature the system claims to track.
+#
+# `regular` returns organic results ONLY. The response still *reports* what was
+# on the page — its `item_types` field for "generative ai development services"
+# reads ['ai_overview', 'organic', 'product_considerations', 'related_searches']
+# — but the `items` array contains just the 19 organic entries. So
+# `ai_overview_present` was false for all 2,126 keyword snapshots, and
+# `keyword_serp_snapshots.serp_features` held 75 observations across the entire
+# set, while the SERPs themselves were full of features.
+#
+# `advanced` returns those items. The same query came back with ai_overview,
+# people_also_ask and related_searches, and the AI Overview carried 6 citations
+# — none of them ours.
+#
+# The cost is identical: $0.0035 either way, measured on live calls to both
+# paths. For the standard queue the charge lands at task_post and the result
+# type is chosen at task_get, so retrieving `advanced` is free too.
+# ---------------------------------------------------------------------------
+SERP_LIVE_PATH = "/serp/google/organic/live/advanced"
+SERP_TASK_GET_PATH = "/serp/google/organic/task_get/advanced"
+
+
 def get_serp_rankings(
     keywords: Iterable[str],
     location_code: int | None = None,
@@ -209,8 +235,7 @@ def get_serp_rankings(
     ]
 
     if queue == "live":
-        path = "/serp/google/organic/live/regular"
-        data = _post(path, payload)
+        data = _post(SERP_LIVE_PATH, payload)
         return _parse_serp_results(data)
 
     # Standard queue: post task, then poll for results. Most agents prefer this
@@ -286,7 +311,7 @@ def _poll_serp_tasks(task_ids: list[str], poll_interval: float = 15.0, max_wait:
 
         for tid in list(matched):
             # task_get is also a GET endpoint (task ID is in the URL path).
-            detail = _get(f"/serp/google/organic/task_get/regular/{tid}")
+            detail = _get(f"{SERP_TASK_GET_PATH}/{tid}")
             results.extend(_parse_serp_results(detail))
             pending.discard(tid)
 
@@ -342,7 +367,7 @@ def drain_ready_serp_tasks(max_tasks: int = 1000) -> list[dict]:
         for tid in batch:
             fetched_ids.add(tid)
             try:
-                detail = _get(f"/serp/google/organic/task_get/regular/{tid}")
+                detail = _get(f"{SERP_TASK_GET_PATH}/{tid}")
                 results.extend(_parse_serp_results(detail))
             except DataForSEOError as exc:
                 logger.warning("drain: failed to fetch task %s: %s", tid, exc)

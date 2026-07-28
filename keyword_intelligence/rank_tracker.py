@@ -126,6 +126,15 @@ def extract_serp_features(raw: dict | None) -> tuple[list[str], bool, list[dict]
     ai_present = False
     ai_citations: list[dict] = []
 
+    # `item_types` is DataForSEO's own inventory of everything on the SERP, and
+    # it is more complete than walking `items`: the regular result type reported
+    # ['ai_overview', 'organic', 'product_considerations', 'related_searches']
+    # here while returning only organic entries in the array. Reading it means a
+    # feature is recorded even when the item body is withheld.
+    for t in (raw.get("item_types") or []):
+        if isinstance(t, str) and t and t != "organic":
+            features.add(t)
+
     for item in (raw.get("items") or []):
         item_type = item.get("type") or ""
         if item_type and item_type != "organic":
