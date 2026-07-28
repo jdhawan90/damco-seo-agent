@@ -56,6 +56,8 @@ __all__ = [
     "GA4NotConfigured",
     "is_available",
     "property_id",
+    "properties",
+    "normalize_property_id",
     "landing_page_metrics",
     "channel_totals",
     "conversion_events",
@@ -90,13 +92,51 @@ class LandingPageRow:
     avg_duration_sec: float
 
 
-def property_id() -> str | None:
-    """Numeric GA4 property id, normalized to bare digits."""
-    raw = (os.environ.get("GA4_PROPERTY_ID")
-           or getattr(settings, "GA4_PROPERTY_ID", "") or "").strip()
-    if not raw or raw in ("your_property_id_here", "properties/"):
+def normalize_property_id(raw: str | None) -> str | None:
+    """Bare digits, accepting the 'properties/123' form."""
+    v = (raw or "").strip()
+    if not v or v in ("your_property_id_here", "properties/"):
         return None
-    return raw.removeprefix("properties/").strip("/") or None
+    return v.removeprefix("properties/").strip("/") or None
+
+
+def property_id() -> str | None:
+    """
+    Fallback property id from the environment.
+
+    Prefer `properties()` — a tenant can own several domains with a GA4
+    property each, and this one only answers for a single-property deployment.
+    """
+    return normalize_property_id(
+        os.environ.get("GA4_PROPERTY_ID") or getattr(settings, "GA4_PROPERTY_ID", "")
+    )
+
+
+def properties() -> list[dict]:
+    """
+    Every (domain, property_id) pair configured for this tenant.
+
+    Reads `tenant_domains.ga4_property_id`, because a property id varies per
+    domain and therefore belongs on the domain row rather than in the process
+    environment. This tenant has two properties; a single env var made one of
+    them invisible to the whole system.
+
+    Falls back to the env var against the primary domain so a single-property
+    deployment needs no database change.
+    """
+    from common.tenant import profile
+
+    p = profile()
+    out = [
+        {"domain": d["domain"], "property_id": pid}
+        for d in p.domain_rows
+        if (pid := normalize_property_id(d.get("ga4_property_id")))
+    ]
+    if out:
+        return out
+
+    env = property_id()
+    return [{"domain": p.primary_domain, "property_id": env}] if env else []
 
 
 def _service_account_file() -> str | None:
@@ -106,9 +146,13 @@ def _service_account_file() -> str | None:
 
 
 def is_available() -> bool:
-    """True when a property id and an importable client are both present."""
-    if property_id() is None:
-        return False
+    """True when at least one property is configured and the client imports."""
+    try:
+        if not properties():
+            return False
+    except Exception:                                   # DB unreachable, no tenant
+        if property_id() is None:
+            return False
     try:
         from google.analytics.data_v1beta import BetaAnalyticsDataClient  # noqa: F401
     except ImportError:
@@ -143,14 +187,16 @@ def _window(lookback_days: int) -> tuple[str, str]:
 
 
 def _run_report(dimensions: Sequence[str], metrics: Sequence[str],
-                lookback_days: int, limit: int) -> list[dict] | None:
+                lookback_days: int, limit: int,
+                prop: str | None = None) -> list[dict] | None:
     """
-    One report. Returns rows as dicts keyed by dimension/metric name, or None
-    when GA4 is unavailable — callers degrade rather than crash.
+    One report against one property. Returns rows as dicts keyed by
+    dimension/metric name, or None when GA4 is unavailable — callers degrade
+    rather than crash.
     """
-    pid = property_id()
+    pid = normalize_property_id(prop) or property_id()
     if pid is None:
-        logger.debug("GA4_PROPERTY_ID not set — GA4 metrics unavailable")
+        logger.debug("No GA4 property id — GA4 metrics unavailable")
         return None
 
     try:
@@ -202,7 +248,8 @@ def _run_report(dimensions: Sequence[str], metrics: Sequence[str],
 
 def landing_page_metrics(lookback_days: int = DEFAULT_LOOKBACK_DAYS,
                          limit: int = 2000,
-                         organic_only: bool = True) -> list[dict] | None:
+                         organic_only: bool = True,
+                         prop: str | None = None) -> list[dict] | None:
     """
     Per-landing-page behaviour, restricted to organic search by default.
 
@@ -220,6 +267,7 @@ def landing_page_metrics(lookback_days: int = DEFAULT_LOOKBACK_DAYS,
                  "conversions", "totalRevenue", "averageSessionDuration"],
         lookback_days=lookback_days,
         limit=limit,
+        prop=prop,
     )
     if rows is None:
         return None
@@ -230,7 +278,8 @@ def landing_page_metrics(lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     return rows
 
 
-def channel_totals(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> list[dict] | None:
+def channel_totals(lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+                   prop: str | None = None) -> list[dict] | None:
     """
     Sessions and conversions by channel. Gives organic a denominator — "SEO
     drove 40 conversions" only means something beside the other channels.
@@ -240,11 +289,13 @@ def channel_totals(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> list[dict] | N
         metrics=["sessions", "engagedSessions", "conversions", "totalRevenue"],
         lookback_days=lookback_days,
         limit=50,
+        prop=prop,
     )
 
 
 def conversion_events(lookback_days: int = DEFAULT_LOOKBACK_DAYS,
-                      limit: int = 50) -> list[dict] | None:
+                      limit: int = 50,
+                      prop: str | None = None) -> list[dict] | None:
     """
     Which conversion events actually fire, and how often.
 
@@ -257,4 +308,5 @@ def conversion_events(lookback_days: int = DEFAULT_LOOKBACK_DAYS,
         metrics=["eventCount", "conversions"],
         lookback_days=lookback_days,
         limit=limit,
+        prop=prop,
     )

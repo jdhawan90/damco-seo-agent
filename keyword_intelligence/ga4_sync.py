@@ -114,20 +114,20 @@ def build_page_index() -> tuple[dict[str, int], set[str]]:
     return index, ambiguous
 
 
-def upsert_landing_pages(rows: list[dict], window_end: date, window_days: int,
-                         index: dict[str, int]) -> dict:
-    """Upsert landing-page metrics. Returns counters."""
+def upsert_landing_pages(rows: list[dict], domain: str, window_end: date,
+                         window_days: int, index: dict[str, int]) -> dict:
+    """Upsert landing-page metrics for one property. Returns counters."""
     stats = {"written": 0, "matched": 0, "unmatched": 0}
     if not rows:
         return stats
 
     sql = """
         INSERT INTO ga4_landing_pages
-            (window_end, window_days, landing_page, channel, page_id,
+            (domain, window_end, window_days, landing_page, channel, page_id,
              sessions, engaged_sessions, engagement_rate, conversions,
              revenue, avg_duration_sec)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (window_end, window_days, landing_page, channel) DO UPDATE SET
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (domain, window_end, window_days, landing_page, channel) DO UPDATE SET
             page_id          = EXCLUDED.page_id,
             sessions         = EXCLUDED.sessions,
             engaged_sessions = EXCLUDED.engaged_sessions,
@@ -146,7 +146,7 @@ def upsert_landing_pages(rows: list[dict], window_end: date, window_days: int,
                 else:
                     stats["unmatched"] += 1
                 cur.execute(sql, (
-                    window_end, window_days, lp[:2000],
+                    domain, window_end, window_days, lp[:2000],
                     r.get("sessionDefaultChannelGroup") or "Organic Search",
                     page_id,
                     int(r.get("sessions") or 0),
@@ -161,15 +161,16 @@ def upsert_landing_pages(rows: list[dict], window_end: date, window_days: int,
     return stats
 
 
-def upsert_channels(rows: list[dict], window_end: date, window_days: int) -> int:
+def upsert_channels(rows: list[dict], domain: str, window_end: date,
+                    window_days: int) -> int:
     if not rows:
         return 0
     sql = """
         INSERT INTO ga4_channel_totals
-            (window_end, window_days, channel, sessions, engaged_sessions,
-             conversions, revenue)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (window_end, window_days, channel) DO UPDATE SET
+            (domain, window_end, window_days, channel, sessions,
+             engaged_sessions, conversions, revenue)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (domain, window_end, window_days, channel) DO UPDATE SET
             sessions         = EXCLUDED.sessions,
             engaged_sessions = EXCLUDED.engaged_sessions,
             conversions      = EXCLUDED.conversions,
@@ -179,7 +180,7 @@ def upsert_channels(rows: list[dict], window_end: date, window_days: int) -> int
         with conn.cursor() as cur:
             for r in rows:
                 cur.execute(sql, (
-                    window_end, window_days,
+                    domain, window_end, window_days,
                     r.get("sessionDefaultChannelGroup") or "(unknown)",
                     int(r.get("sessions") or 0),
                     int(r.get("engagedSessions") or 0),
@@ -208,80 +209,115 @@ def run(days: int = ga4.DEFAULT_LOOKBACK_DAYS, all_channels: bool = False,
         return {"status": "skipped", "reason": "not_configured"}
 
     window_end = date.today() - timedelta(days=ga4.DATA_LAG_DAYS)
-
-    pages = ga4.landing_page_metrics(lookback_days=days, organic_only=not all_channels)
-    channels = ga4.channel_totals(lookback_days=days)
-    events = ga4.conversion_events(lookback_days=days) if show_events else None
-
-    if pages is None and channels is None:
-        err = "GA4 returned no data — check the property id and that the service account has Viewer."
-        logger.error(err)
-        if not dry_run:
-            record_agent_run(agent_name=AGENT_NAME, status="failed",
-                             records_processed=0, errors=[err],
-                             duration_seconds=round(time.monotonic() - start, 2))
-        return {"status": "failed", "reason": err}
-
+    props = ga4.properties()
     index, ambiguous = build_page_index()
 
-    lp_stats = {"written": 0, "matched": 0, "unmatched": 0}
-    ch_written = 0
-    if not dry_run:
-        lp_stats = upsert_landing_pages(pages or [], window_end, days, index)
-        ch_written = upsert_channels(channels or [], window_end, days)
-    else:
-        for r in (pages or []):
-            if index.get(_norm_path(r.get("landingPage") or "")):
-                lp_stats["matched"] += 1
-            else:
-                lp_stats["unmatched"] += 1
+    # Domains with no GA4 property are reported, not silently omitted. "We have
+    # no data for damcodigital.com" and "damcodigital.com has no traffic" look
+    # identical on a dashboard and mean completely different things.
+    configured = {p["domain"] for p in props}
+    unconfigured = [d["domain"] for d in profile().domain_rows
+                    if d["domain"] not in configured]
+
+    print()
+    print(f"  {'=' * 68}")
+    print(f"   GA4 SYNC — window ending {window_end} ({days}d)"
+          f"{'  [DRY RUN]' if dry_run else ''}")
+    print(f"  {'=' * 68}")
+
+    per_domain = []
+    errors: list[str] = []
+    total = {"written": 0, "matched": 0, "unmatched": 0, "channels": 0}
+
+    for prop in props:
+        domain, pid = prop["domain"], prop["property_id"]
+        pages = ga4.landing_page_metrics(lookback_days=days,
+                                        organic_only=not all_channels, prop=pid)
+        channels = ga4.channel_totals(lookback_days=days, prop=pid)
+        events = ga4.conversion_events(lookback_days=days, prop=pid) if show_events else None
+
+        if pages is None and channels is None:
+            err = (f"{domain} (property {pid}): no data returned — check the id and "
+                   f"that the service account has Viewer on it")
+            logger.error(err)
+            errors.append(err)
+            per_domain.append({"domain": domain, "property_id": pid, "error": err})
+            continue
+
+        lp = {"written": 0, "matched": 0, "unmatched": 0}
+        ch = 0
+        if dry_run:
+            for r in (pages or []):
+                key = "matched" if index.get(_norm_path(r.get("landingPage") or "")) else "unmatched"
+                lp[key] += 1
+        else:
+            lp = upsert_landing_pages(pages or [], domain, window_end, days, index)
+            ch = upsert_channels(channels or [], domain, window_end, days)
+
+        organic = next((c for c in (channels or [])
+                        if (c.get("sessionDefaultChannelGroup") or "").lower()
+                        == "organic search"), None)
+
+        for k in ("written", "matched", "unmatched"):
+            total[k] += lp[k]
+        total["channels"] += ch
+
+        per_domain.append({
+            "domain": domain, "property_id": pid, **lp, "channels": ch,
+            "organic_sessions": int((organic or {}).get("sessions") or 0),
+            "organic_conversions": float((organic or {}).get("conversions") or 0),
+        })
+
+        print()
+        print(f"  {domain}  (property {pid})")
+        print(f"    landing pages:     {lp['written'] or (lp['matched'] + lp['unmatched'])}")
+        print(f"      matched:           {lp['matched']}")
+        print(f"      unattributed:      {lp['unmatched']}"
+              f"{'  (no `pages` row — run sitemap_validator)' if lp['unmatched'] else ''}")
+        print(f"    channels:          {ch}")
+        if organic:
+            print(f"    organic sessions:  {int(organic.get('sessions') or 0):,}")
+            print(f"    organic conv.:     {organic.get('conversions') or 0:,.0f}")
+        if events is not None:
+            print("    conversion events firing:")
+            if not events:
+                print("      none — this property has no key events configured, so")
+                print("      'zero conversions' means 'not measured', not 'none happened'")
+            for e in events[:8]:
+                print(f"      {e.get('eventName', '?'):<32} "
+                      f"count={int(e.get('eventCount') or 0):>8,}"
+                      f"  conv={e.get('conversions') or 0:>7,.0f}")
 
     duration = time.monotonic() - start
-    organic = next((c for c in (channels or [])
-                    if (c.get("sessionDefaultChannelGroup") or "").lower() == "organic search"), None)
 
+    print()
+    print(f"  Properties synced:   {len([p for p in per_domain if not p.get('error')])}"
+          f" of {len(props)}")
+    if unconfigured:
+        print(f"  No GA4 property:     {', '.join(unconfigured)}"
+              f"  (skipped — not the same as zero traffic)")
+    if ambiguous:
+        print(f"  Ambiguous paths:     {len(ambiguous)} on >1 owned domain, left unattributed")
+    print(f"  Landing pages:       {total['written'] or total['matched'] + total['unmatched']}"
+          f"  ({total['matched']} matched, {total['unmatched']} unattributed)")
+    print(f"  Duration:            {duration:.1f}s")
+    print()
+
+    status = "success" if not errors else ("partial" if total["written"] else "failed")
     if not dry_run:
         record_agent_run(
-            agent_name=AGENT_NAME, status="success",
-            records_processed=lp_stats["written"], errors=[],
+            agent_name=AGENT_NAME, status=status,
+            records_processed=total["written"], errors=errors[:5],
             duration_seconds=round(duration, 2),
             metadata={
                 "window_end": window_end.isoformat(), "window_days": days,
-                "landing_pages": lp_stats["written"], "matched": lp_stats["matched"],
-                "unmatched": lp_stats["unmatched"], "channels": ch_written,
-                "all_channels": all_channels,
+                "properties": len(props), "per_domain": per_domain,
+                "unconfigured_domains": unconfigured,
+                "all_channels": all_channels, **total,
             },
         )
 
-    print()
-    print(f"  {'=' * 68}")
-    print(f"   GA4 SYNC — window ending {window_end} ({days}d){'  [DRY RUN]' if dry_run else ''}")
-    print(f"  {'=' * 68}")
-    print()
-    print(f"  Landing pages:     {lp_stats['written']}")
-    print(f"    matched to pages:  {lp_stats['matched']}")
-    print(f"    unattributed:      {lp_stats['unmatched']}"
-          f"{'  (no `pages` row — run sitemap_validator)' if lp_stats['unmatched'] else ''}")
-    if ambiguous:
-        print(f"    ambiguous paths:   {len(ambiguous)} (same path on >1 owned domain)")
-    print(f"  Channels:          {ch_written}")
-    if organic:
-        print(f"  Organic sessions:  {int(organic.get('sessions') or 0):,}")
-        print(f"  Organic conv.:     {organic.get('conversions') or 0:,.0f}")
-    if events is not None:
-        print()
-        print("  Conversion events firing (check this before trusting a conversion number):")
-        if not events:
-            print("    none — the property has no key events configured, so 'zero")
-            print("    conversions' means 'not measured', not 'none happened'")
-        for e in events[:10]:
-            print(f"    {e.get('eventName', '?'):<34} count={int(e.get('eventCount') or 0):>8,}"
-                  f"  conv={e.get('conversions') or 0:>8,.0f}")
-    print(f"  Duration:          {duration:.1f}s")
-    print()
-
-    return {"status": "success", "landing_pages": lp_stats["written"],
-            "matched": lp_stats["matched"], "channels": ch_written}
+    return {"status": status, "properties": len(props), "per_domain": per_domain, **total}
 
 
 def main() -> None:

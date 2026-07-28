@@ -260,8 +260,14 @@ def _load(slug: str | None = None) -> TenantProfile:
 
     tid = row["id"]
 
+    # Selected explicitly rather than SELECT * so a schema addition is a
+    # deliberate act — but that also means a new column is invisible until it is
+    # listed here. ga4_property_id and gsc_site_url (migration 019) were added
+    # and silently absent for exactly that reason.
     domain_rows = fetch_all(
-        "SELECT domain, role, sitemap_url, uses_www FROM tenant_domains "
+        "SELECT domain, role, sitemap_url, uses_www, "
+        "       ga4_property_id, gsc_site_url "
+        "  FROM tenant_domains "
         " WHERE tenant_id = %s AND enabled ORDER BY role, domain",
         [tid],
     )
