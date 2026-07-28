@@ -71,12 +71,42 @@ def visibility() -> dict:
 
     Exactly one hero number per view, per the marks spec — this is it.
     """
-    latest = fetch_one(
+    # The headline uses the most recent date with a MEANINGFUL sample, not simply
+    # the most recent date.
+    #
+    # A tracking run in progress writes a few dozen snapshots. Reading the raw
+    # newest date then showed 14.5% over 69 keywords where the last complete
+    # cycle was 19.1% over 2,126 — a five-point "drop" that is only a partial
+    # denominator. The trend already guarded against this; the headline did not,
+    # which is worse, because it is the number people quote.
+    latest_full = fetch_one(
+        """
+        SELECT date FROM keyword_rankings
+         WHERE source <> 'gsc'
+         GROUP BY date HAVING count(*) >= %s
+         ORDER BY date DESC LIMIT 1
+        """,
+        [MIN_CYCLE_SAMPLE],
+    )
+    newest = fetch_one(
         "SELECT max(date) AS d FROM keyword_rankings WHERE source <> 'gsc'"
     )
-    latest_date = latest["d"] if latest else None
+    latest_date = latest_full["date"] if latest_full else (newest["d"] if newest else None)
     if not latest_date:
         return {"value": None, "trend": [], **_stale(None)}
+
+    # A run mid-flight is worth surfacing rather than hiding: it explains why
+    # the headline date is not today.
+    partial = None
+    if newest and newest["d"] and newest["d"] > latest_date:
+        n = fetch_one(
+            """
+            SELECT count(*) AS n FROM keyword_rankings
+             WHERE source <> 'gsc' AND date = %s
+            """,
+            [newest["d"]],
+        )["n"]
+        partial = {"date": newest["d"].isoformat(), "measured": n}
 
     cur = fetch_one(
         """
@@ -153,6 +183,7 @@ def visibility() -> dict:
         "delta_vs": prev["label"] if prev else None,
         "delta_basis": delta_basis,
         "trend": public_trend,
+        "partial_run": partial,
         **_stale(latest_date),
     }
 

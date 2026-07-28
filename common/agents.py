@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 AGENT_FOLDERS = (
+    "dashboard",
     "keyword_intelligence",
     "technical_seo",
     "offpage_links",
@@ -105,6 +106,24 @@ class AgentSpec:
 # ---------------------------------------------------------------------------
 
 CATALOGUE: tuple[AgentSpec, ...] = (
+
+    # -- dashboard -----------------------------------------------------------
+    AgentSpec(
+        name="dashboard.render_static",
+        title="Static Dashboard Renderer",
+        kind="deterministic",
+        summary="Renders the dashboard to a self-contained HTML file with the "
+                "figures baked in — no server, no database, no external requests.",
+        reads=("keyword_rankings", "keyword_serp_snapshots", "pages",
+               "technical_issues", "cwv_metrics", "keyword_candidates",
+               "ga4_landing_pages", "agent_runs"),
+        writes=(),
+        cadence_days=1,
+        notes="Exists because a hosted page cannot reach a local PostgreSQL. "
+              "Baking the numbers in keeps rankings, competitor analysis and "
+              "conversion data off public infrastructure. The output has no "
+              "authentication of its own — anything hosting it must supply that.",
+    ),
 
     # -- keyword_intelligence ------------------------------------------------
     AgentSpec(

@@ -318,7 +318,9 @@ function render(d) {
   $('#subtitle').innerHTML =
     `${esc(m.primary_domain || '')} · ${m.offerings ? m.offerings.length + ' offerings' : ''}
      · generated ${esc((m.generated_at || '').replace('T', ' '))}
-     · <span class="stamp">tiles read the database only; nothing here calls a live API</span>`;
+     · <span class="stamp">${STATIC
+        ? 'static snapshot — figures are fixed at the time above, not live'
+        : 'tiles read the database only; nothing here calls a live API'}</span>`;
 
   const v = d.visibility || {}, pd = d.position_distribution || {},
         nm = d.net_movement || {}, gsc = d.search_console || {},
@@ -350,6 +352,10 @@ function render(d) {
       <div class="mt">${deltaHtml(v.delta)}${v.delta_vs ? ` <span class="stamp">vs ${esc(v.delta_vs)}</span>` : ''}</div>
       ${v.delta_basis ? `<p class="note mt" style="margin-bottom:0">Measured ${esc(v.delta_basis)} — not by
         subtracting two percentages over different keyword sets.</p>` : ''}
+      ${v.partial_run ? `<p class="note mt" style="margin-bottom:0"><span class="stamp warn">A run is
+        in progress</span> — ${fmt(v.partial_run.measured)} keywords measured on
+        ${esc(v.partial_run.date)} so far. The figure above is the last complete cycle;
+        it will move once that run finishes.</p>` : ''}
     </div>
     <div class="card">
       <h2>Visibility over time</h2>
@@ -639,8 +645,23 @@ function render(d) {
   if (v.trend && v.trend.length > 1) bindTrend($('#trend'), v.trend);
 }
 
+/* Two delivery modes, one file.
+   - Served by FastAPI: fetches /api/kpis live.
+   - Static snapshot:   render_static.py injects window.__KPI_DATA__ ahead of
+                        this script, so the page needs no server and no
+                        database. Same markup and styling either way, so there
+                        is no second template to keep in sync. */
+const STATIC = typeof window.__KPI_DATA__ !== 'undefined';
+
 async function load() {
   const root = $('#root');
+
+  if (STATIC) {
+    render(window.__KPI_DATA__);
+    root.dataset.loaded = '1';
+    return;
+  }
+
   // Hold the previous render at reduced opacity rather than flashing a skeleton.
   if (root.dataset.loaded) root.style.opacity = 0.55;
   try {
@@ -656,7 +677,12 @@ async function load() {
   }
 }
 
-$('#refresh').addEventListener('click', load);
+// A Refresh button that cannot refresh is worse than no button.
+if (STATIC) {
+  $('#refresh').remove();
+} else {
+  $('#refresh').addEventListener('click', load);
+}
 $('#theme').addEventListener('click', () => {
   const cur = document.documentElement.getAttribute('data-theme');
   const dark = cur ? cur === 'dark'

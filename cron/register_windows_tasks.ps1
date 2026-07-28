@@ -59,6 +59,7 @@ $jobs = @(
     # Daily. Free feeds plus one Keyword Planner batch (~$0.05).
     @{ Name = 'trend_scout';            Module = 'keyword_intelligence.trend_scout';            Sc = 'DAILY';   Day = $null;    Time = '02:15' }
     @{ Name = 'ga4_sync';               Module = 'keyword_intelligence.ga4_sync';               Sc = 'DAILY';   Day = $null;    Time = '02:45' }
+    @{ Name = 'render_static';          Module = 'dashboard.render_static';                     Sc = 'DAILY';   Day = $null;    Time = '09:00' }
 
     # Weekly. All free.
     @{ Name = 'competitor_monitor';     Module = 'competitive_intelligence.competitor_monitor'; Sc = 'WEEKLY';  Day = 'MON';    Time = '02:30' }

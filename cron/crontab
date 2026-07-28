@@ -58,6 +58,11 @@ MAILTO=""
 # GA4_PROPERTY_ID is unset.
 45 2 * * *   cd $REPO && $PY -m keyword_intelligence.ga4_sync >> logs/ga4_sync.log 2>&1
 
+# Static dashboard snapshot. Free, ~1s. Runs last in the daily block so it
+# picks up whatever trend_scout and ga4_sync just wrote. Deploy step is
+# deliberately not automated — see dashboard/render_static.py.
+0 9 * * *    cd $REPO && $PY -m dashboard.render_static >> logs/render_static.log 2>&1
+
 # ---------------------------------------------------------------------------
 # Weekly
 # ---------------------------------------------------------------------------
