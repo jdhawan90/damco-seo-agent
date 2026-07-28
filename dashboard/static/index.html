@@ -25,6 +25,7 @@
   --hairline:    rgba(11,11,11,0.10);
 
   --series-1:    #2a78d6;
+  --series-2:    #eb6834;   /* used only for emphasis on one channel */
 
   /* ordinal ramp, best -> worst position */
   --ord-1: #104281;
@@ -52,6 +53,7 @@
     --axis:     #383835;
     --hairline: rgba(255,255,255,0.10);
     --series-1: #3987e5;
+    --series-2: #d95926;
     --ord-1: #9ec5f4; --ord-2: #6da7ec; --ord-3: #3987e5;
     --ord-4: #256abf; --ord-5: #184f95; --ord-none: #383835;
     --delta-good: #0ca30c;
@@ -68,6 +70,7 @@
   --axis:     #383835;
   --hairline: rgba(255,255,255,0.10);
   --series-1: #3987e5;
+  --series-2: #d95926;
   --ord-1: #9ec5f4; --ord-2: #6da7ec; --ord-3: #3987e5;
   --ord-4: #256abf; --ord-5: #184f95; --ord-none: #383835;
   --delta-good: #0ca30c;
@@ -323,7 +326,9 @@ function render(d) {
         th = d.technical_health || {}, cwv = d.core_web_vitals || {},
         cq = d.candidate_queue || {}, cm = d.competitor_movement || {},
         sov = d.share_of_voice || {}, ah = d.agent_health || {},
-        cp = d.content_pipeline || {}, ra = d.run_activity || {};
+        cp = d.content_pipeline || {}, ra = d.run_activity || {},
+        um = d.url_mismatch || {}, dg = d.demand_gap || {},
+        chm = d.channel_mix || {}, att = d.attribution_coverage || {};
 
   const ordVar = (i, bucket) => bucket === 'not-found' ? 'var(--ord-none)' : `var(--ord-${i + 1})`;
   const maxBucket = Math.max(1, ...(pd.buckets || []).map(b => b.count));
@@ -384,10 +389,117 @@ function render(d) {
       <div class="mt">${stamp(cg)}</div>
     </div>
     <div class="card">
+      <div class="tile-lbl">Impressions, no clicks</div>
+      <div class="tile-val">${compact(dg.lost_impressions)}</div>
+      <div class="tile-lbl">${fmt(dg.zero_click_count)} keywords seen and never clicked</div>
+      <div class="mt">${stamp(dg)}</div>
+    </div>
+    <div class="card">
+      <div class="tile-lbl">Wrong page ranking</div>
+      <div class="tile-val">${um.pct != null ? um.pct + '%' : '—'}</div>
+      <div class="tile-lbl">${fmt(um.count)} of ${fmt(um.ranking_total)} ranking keywords</div>
+      <div class="mt">${stamp(um)}</div>
+    </div>
+    <div class="card">
       <div class="tile-lbl">Candidates to review</div>
       <div class="tile-val">${fmt(cq.awaiting_review)}</div>
       <div class="tile-lbl">promotion is human-gated</div>
       <div class="mt">${stamp(cq, 14, 30)}</div>
+    </div>
+  </div>
+
+  <!-- DEMAND GAP + WRONG PAGE -->
+  <div class="grid g-two mt">
+    <div class="card">
+      <h2>Demand we're not capturing</h2>
+      <p class="note">Google shows these to thousands of people and nobody clicks.
+        ${fmt(dg.zero_click_count)} keywords with ${fmt(dg.min_impressions)}+ impressions and
+        zero clicks · ${stamp(dg)}</p>
+      ${tvTable([{label:'Keyword'},{label:'Offering'},{label:'Impressions',num:1},{label:'GSC pos',num:1},{label:'SERP pos',num:1}],
+        (dg.zero_click || []).slice(0, 12),
+        r => [esc(r.keyword), esc(r.offering || '—'), fmt(r.impressions),
+              r.gsc_position ?? '—', r.serp_position ?? 'not found'])}
+      <p class="note" style="margin:10px 0 0">A low SERP position means ranking work;
+        ranking well with no clicks means the title and meta aren't earning the click.</p>
+      ${(dg.low_ctr || []).length ? `
+      <details class="tv"><summary>Also: ranking, clicked, but under ${dg.min_impressions ? '0.5' : ''}% CTR</summary>
+        ${tvTable([{label:'Keyword'},{label:'Impressions',num:1},{label:'Clicks',num:1},{label:'CTR',num:1},{label:'SERP pos',num:1}],
+          dg.low_ctr, r => [esc(r.keyword), fmt(r.impressions), fmt(r.clicks),
+            r.ctr != null ? (r.ctr * 100).toFixed(2) + '%' : '—', r.serp_position ?? '—'])}
+      </details>` : ''}
+    </div>
+
+    <div class="card">
+      <h2>A different page is ranking</h2>
+      <p class="note">${fmt(um.count)} keywords rank a page other than the one assigned
+        (${um.pct}%). Either two pages compete, or the assignment was wrong — the data
+        can't tell which, so review rather than assume. · ${stamp(um)}</p>
+      ${tvTable([{label:'Keyword'},{label:'Pos',num:1},{label:'Assigned'},{label:'Actually ranking'}],
+        (um.keywords || []).slice(0, 12),
+        r => [esc(r.keyword), r.position,
+              `<span class="stamp">${esc((r.assigned_url || '').replace(/^https?:\/\/[^/]+/, ''))}</span>`,
+              `<span class="stamp">${esc((r.ranking_url || '').replace(/^https?:\/\/[^/]+/, ''))}</span>`])}
+      ${um.unassigned ? `<p class="note" style="margin:10px 0 0">${fmt(um.unassigned)} ranking
+        keywords have no assigned page at all.</p>` : ''}
+    </div>
+  </div>
+
+  <!-- CHANNEL MIX + ATTRIBUTION -->
+  <div class="grid g-two mt">
+    <div class="card">
+      <h2>Channel mix</h2>
+      <p class="note">${chm.window_days ? chm.window_days + '-day window' : ''} ·
+        ${compact(chm.total_sessions)} sessions · ${stamp(chm, 7, 21)}</p>
+      ${(chm.channels || []).slice(0, 8).map(c => {
+        // Emphasis, not a value ramp: organic is the subject of this dashboard,
+        // AI Assistant is the finding. Everything else recedes.
+        const lc = c.channel.toLowerCase();
+        const hue = lc === 'organic search' ? 'var(--series-1)'
+                  : (lc.includes('ai') && lc.includes('assistant')) ? 'var(--series-2)'
+                  : 'var(--ord-none)';
+        const w = chm.total_sessions ? 100 * c.sessions / chm.total_sessions : 0;
+        return `
+        <div class="bar-row">
+          <div class="bar-lbl" title="${esc(c.channel)}">${esc(c.channel)}</div>
+          <div class="bar-track"><div class="bar-fill"
+            style="width:${Math.max(0.4, w)}%;background:${hue}"></div></div>
+          <div class="bar-num">${compact(c.sessions)} · ${c.cvr_pct != null ? c.cvr_pct + '%' : '—'}</div>
+        </div>`;
+      }).join('')}
+      <p class="note" style="margin:8px 0 0">Bar length is sessions; the second number is
+        conversion rate. ${chm.ai_vs_organic_cvr ? `<strong>AI Assistant traffic converts
+        ${chm.ai_vs_organic_cvr}× better than organic search</strong>
+        (${(chm.ai_assistant || {}).cvr_pct}% vs ${(chm.organic || {}).cvr_pct}%)</strong> —
+        a small channel behaving much better than the big one.` : ''}</p>
+      <details class="tv"><summary>Table view</summary>
+        ${tvTable([{label:'Channel'},{label:'Sessions',num:1},{label:'Share',num:1},{label:'Conversions',num:1},{label:'CVR',num:1}],
+          chm.channels, r => [esc(r.channel), fmt(r.sessions), r.share_pct + '%',
+            r.conversions, r.cvr_pct != null ? r.cvr_pct + '%' : '—'])}
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>Attribution coverage</h2>
+      <p class="note">How much of the conversion data can be assigned to an offering.
+        Every per-offering number is qualified by this. · ${stamp(att, 7, 21)}</p>
+      <div class="hero-fig" style="font-size:2.4rem">${att.coverage_pct != null ? att.coverage_pct + '%' : '—'}</div>
+      <div class="tile-lbl mt">${att.attributed} of ${att.total} organic conversions</div>
+      <div class="mt">
+        ${[['Assigned to an offering', att.attributed, 'var(--good)'],
+           ['Page matched, no offering set', att.page_no_offering, 'var(--warning)'],
+           ['No page record for that URL', att.no_page, 'var(--critical)']].map(([l, v, c]) => `
+          <div class="bar-row">
+            <div class="bar-lbl" style="font-size:0.74rem">${l}</div>
+            <div class="bar-track"><div class="bar-fill"
+              style="width:${att.total ? Math.max(0.4, 100 * v / att.total) : 0}%;background:${c}"></div></div>
+            <div class="bar-num">${v}</div>
+          </div>`).join('')}
+      </div>
+      <p class="note" style="margin:10px 0 0">
+        ${fmt(att.pages_with_offering)} of ${fmt(att.pages_total)} pages carry an offering.
+        The largest single converter is the homepage, which has none by nature —
+        so this will never reach 100%, but it should be far above ${att.coverage_pct}%.
+      </p>
     </div>
   </div>
 

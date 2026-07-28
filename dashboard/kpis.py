@@ -673,6 +673,270 @@ def content_pipeline() -> dict:
     }
 
 
+def url_mismatch(limit: int = 15) -> dict:
+    """
+    Keywords where a different page ranks than the one assigned to them.
+
+    18.6% of ranking keywords at time of writing — nearly one in five. Two
+    different problems wear the same shape:
+
+      * cannibalization — two of our pages compete and the weaker one wins
+      * mis-assignment  — the assigned page was simply the wrong choice
+
+    The data cannot tell them apart, so this is framed as "review", not "error".
+    Sometimes the page that actually ranks is the better page and the assignment
+    should change to match it.
+    """
+    latest = fetch_one(
+        "SELECT max(date) AS d FROM keyword_rankings WHERE source <> 'gsc'"
+    )
+    latest_date = latest["d"] if latest else None
+    if not latest_date:
+        return {"count": 0, "keywords": [], **_stale(None)}
+
+    counts = fetch_one(
+        """
+        SELECT count(*) AS ranking,
+               count(*) FILTER (
+                   WHERE k.target_url IS NOT NULL AND r.url_found IS NOT NULL
+                     AND starts_with(k.target_url, 'http')
+                     AND lower(rtrim(r.url_found, '/')) <> lower(rtrim(k.target_url, '/'))
+               ) AS mismatched,
+               -- A target_url that is not a URL is unassigned, not mismatched.
+               -- Nine rows held the literal string 'NaN' from a spreadsheet
+               -- import and would otherwise be permanent false positives in a
+               -- list meant to be acted on. Migration 022 clears them; this
+               -- guard keeps the tile honest if it happens again.
+               count(*) FILTER (
+                   WHERE k.target_url IS NULL
+                      OR NOT starts_with(k.target_url, 'http')
+               ) AS unassigned
+          FROM keyword_rankings r
+          JOIN keywords k ON k.id = r.keyword_id
+         WHERE r.source <> 'gsc' AND r.rank_position IS NOT NULL AND r.date = %s
+        """,
+        [latest_date],
+    )
+
+    rows = fetch_all(
+        """
+        SELECT k.keyword, k.offering, r.rank_position AS position,
+               k.target_url AS assigned_url, r.url_found AS ranking_url
+          FROM keyword_rankings r
+          JOIN keywords k ON k.id = r.keyword_id
+         WHERE r.source <> 'gsc' AND r.date = %s
+           AND r.rank_position IS NOT NULL
+           AND k.target_url IS NOT NULL AND r.url_found IS NOT NULL
+           AND starts_with(k.target_url, 'http')
+           AND lower(rtrim(r.url_found, '/')) <> lower(rtrim(k.target_url, '/'))
+         ORDER BY r.rank_position
+         LIMIT %s
+        """,
+        [latest_date, limit],
+    )
+    ranking = counts["ranking"] or 0
+    return {
+        "count": counts["mismatched"] or 0,
+        "ranking_total": ranking,
+        "pct": round(100.0 * (counts["mismatched"] or 0) / ranking, 1) if ranking else 0.0,
+        "unassigned": counts["unassigned"] or 0,
+        "keywords": rows,
+        **_stale(latest_date),
+    }
+
+
+# Impression floor for the demand-gap list. Below this, zero clicks is just a
+# small sample rather than a missed opportunity.
+DEMAND_GAP_MIN_IMPRESSIONS = 300
+DEMAND_GAP_LOW_CTR_PCT = 0.5
+
+
+def demand_gap(limit: int = 15) -> dict:
+    """
+    Keywords Google shows us for, that nobody clicks.
+
+    The most directly actionable list on the dashboard. "cloud migration
+    services" draws 2,608 impressions and zero clicks — that is demand already
+    reaching the SERP and being handed to someone else.
+
+    Two causes, separated here because the fix differs:
+      * position too low to be clicked at all      -> ranking work
+      * ranking but the snippet is not compelling  -> title/meta work
+
+    Impressions and clicks come from GSC; position comes from the SERP snapshot
+    so the two can disagree, which is itself informative.
+    """
+    gsc_latest = fetch_one(
+        "SELECT max(date) AS d FROM keyword_rankings WHERE source = 'gsc'"
+    )
+    if not gsc_latest or not gsc_latest["d"]:
+        return {"zero_click": [], "low_ctr": [], **_stale(None)}
+    gd = gsc_latest["d"]
+
+    serp_latest = fetch_one(
+        "SELECT max(date) AS d FROM keyword_rankings WHERE source <> 'gsc'"
+    )
+    sd = serp_latest["d"] if serp_latest else None
+
+    base = """
+        SELECT k.keyword, k.offering,
+               g.impressions, g.clicks, g.ctr,
+               round(g.rank_position::numeric, 1) AS gsc_position,
+               s.rank_position AS serp_position
+          FROM keyword_rankings g
+          JOIN keywords k ON k.id = g.keyword_id
+          LEFT JOIN keyword_rankings s
+                 ON s.keyword_id = k.id AND s.source <> 'gsc' AND s.date = %s
+         WHERE g.source = 'gsc' AND g.date = %s
+           AND g.impressions >= %s
+    """
+
+    zero_click = fetch_all(
+        base + " AND COALESCE(g.clicks, 0) = 0 ORDER BY g.impressions DESC LIMIT %s",
+        [sd, gd, DEMAND_GAP_MIN_IMPRESSIONS, limit],
+    )
+    low_ctr = fetch_all(
+        base + """ AND COALESCE(g.clicks, 0) > 0
+                   AND g.ctr * 100 < %s
+              ORDER BY g.impressions DESC LIMIT %s""",
+        [sd, gd, DEMAND_GAP_MIN_IMPRESSIONS, DEMAND_GAP_LOW_CTR_PCT, limit],
+    )
+
+    totals = fetch_one(
+        """
+        SELECT count(*) AS n,
+               COALESCE(sum(impressions), 0) AS lost_impressions
+          FROM keyword_rankings
+         WHERE source = 'gsc' AND date = %s
+           AND impressions >= %s AND COALESCE(clicks, 0) = 0
+        """,
+        [gd, DEMAND_GAP_MIN_IMPRESSIONS],
+    )
+    return {
+        "zero_click": zero_click,
+        "low_ctr": low_ctr,
+        "zero_click_count": totals["n"],
+        "lost_impressions": int(totals["lost_impressions"] or 0),
+        "min_impressions": DEMAND_GAP_MIN_IMPRESSIONS,
+        **_stale(gd),
+    }
+
+
+def channel_mix() -> dict:
+    """
+    Sessions and conversions by channel, so organic has a denominator.
+
+    Included because it surfaced something the SEO-only view could not: AI
+    Assistant traffic converts at roughly 4.9% against organic search's 1.6%.
+    LLM referrals are a small channel that behaves far better than classic
+    organic, and nothing else on the dashboard would have shown it.
+    """
+    latest = fetch_one("SELECT max(window_end) AS d FROM ga4_channel_totals")
+    if not latest or not latest["d"]:
+        return {"channels": [], **_stale(None)}
+    d = latest["d"]
+
+    rows = fetch_all(
+        """
+        SELECT channel,
+               sum(sessions)         AS sessions,
+               sum(engaged_sessions) AS engaged_sessions,
+               sum(conversions)      AS conversions,
+               sum(revenue)          AS revenue,
+               count(DISTINCT domain) AS domains
+          FROM ga4_channel_totals
+         WHERE window_end = %s
+         GROUP BY channel
+         ORDER BY sum(sessions) DESC
+        """,
+        [d],
+    )
+    window = fetch_one(
+        "SELECT max(window_days) AS w FROM ga4_channel_totals WHERE window_end = %s", [d]
+    )
+    total_sessions = sum(int(r["sessions"] or 0) for r in rows) or 1
+    out = []
+    for r in rows:
+        s = int(r["sessions"] or 0)
+        c = float(r["conversions"] or 0)
+        out.append({
+            "channel": r["channel"],
+            "sessions": s,
+            "conversions": c,
+            "domains": r["domains"],
+            "share_pct": round(100.0 * s / total_sessions, 1),
+            "cvr_pct": round(100.0 * c / s, 2) if s else None,
+        })
+
+    organic = next((c for c in out if c["channel"].lower() == "organic search"), None)
+    ai = next((c for c in out if "ai" in c["channel"].lower()
+               and "assistant" in c["channel"].lower()), None)
+    return {
+        "channels": out,
+        "total_sessions": total_sessions,
+        "window_days": window["w"] if window else None,
+        "organic": organic,
+        "ai_assistant": ai,
+        # Stated as a ratio rather than left for the reader to divide, because
+        # this is the comparison that makes the tile worth having.
+        "ai_vs_organic_cvr": (
+            round(ai["cvr_pct"] / organic["cvr_pct"], 1)
+            if ai and organic and organic.get("cvr_pct") else None
+        ),
+        **_stale(d),
+    }
+
+
+def attribution_coverage() -> dict:
+    """
+    How much of the conversion data can actually be assigned to an offering.
+
+    Qualifies every other conversion number on the page. Roughly a quarter is
+    attributable today: most converting URLs have no `pages` row at all, and
+    the biggest single converter is the homepage, which has no offering by
+    nature. Without this tile the per-offering table reads as a verdict on the
+    offerings rather than on the mapping.
+    """
+    latest = fetch_one("SELECT max(window_end) AS d FROM ga4_landing_pages")
+    if not latest or not latest["d"]:
+        return {"total": 0, **_stale(None)}
+    d = latest["d"]
+
+    r = fetch_one(
+        """
+        SELECT
+          COALESCE(sum(g.conversions), 0) AS total,
+          COALESCE(sum(g.conversions) FILTER (WHERE p.offering IS NOT NULL), 0) AS attributed,
+          COALESCE(sum(g.conversions) FILTER (
+              WHERE g.page_id IS NOT NULL AND p.offering IS NULL), 0) AS page_no_offering,
+          COALESCE(sum(g.conversions) FILTER (WHERE g.page_id IS NULL), 0) AS no_page,
+          count(*) FILTER (WHERE g.page_id IS NULL) AS unmatched_pages,
+          count(*) AS landing_pages
+          FROM ga4_landing_pages g
+          LEFT JOIN pages p ON p.id = g.page_id
+         WHERE g.window_end = %s AND g.channel = 'Organic Search'
+        """,
+        [d],
+    )
+    total = float(r["total"] or 0)
+    pages_with_offering = fetch_one(
+        "SELECT count(*) AS n FROM pages WHERE offering IS NOT NULL")["n"]
+    pages_total = fetch_one("SELECT count(*) AS n FROM pages")["n"]
+
+    return {
+        "total": total,
+        "attributed": float(r["attributed"] or 0),
+        "page_no_offering": float(r["page_no_offering"] or 0),
+        "no_page": float(r["no_page"] or 0),
+        "coverage_pct": round(100.0 * float(r["attributed"] or 0) / total, 1) if total else 0.0,
+        "unmatched_pages": r["unmatched_pages"],
+        "landing_pages": r["landing_pages"],
+        "pages_with_offering": pages_with_offering,
+        "pages_total": pages_total,
+        **_stale(d),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tier 3 — system health
 # ---------------------------------------------------------------------------
@@ -750,6 +1014,10 @@ TILES = {
     "striking_distance":     striking_distance,
     "share_of_voice":        share_of_voice,
     "coverage_gaps":         coverage_gaps,
+    "url_mismatch":          url_mismatch,
+    "demand_gap":            demand_gap,
+    "channel_mix":           channel_mix,
+    "attribution_coverage":  attribution_coverage,
     "technical_health":      technical_health,
     "core_web_vitals":       core_web_vitals,
     "candidate_queue":       candidate_queue,
