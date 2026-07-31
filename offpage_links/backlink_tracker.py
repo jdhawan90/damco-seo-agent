@@ -362,15 +362,34 @@ def run(page_id: int | None = None,
         for scheme in ("https://", "http://"):
             host = host.removeprefix(scheme)
         host = host.rstrip("/")
-        home_candidates = [f"https://{host}/", f"https://www.{host}/", f"http://{host}/"]
-        for cand in home_candidates:
-            row = fetch_one("SELECT id, url, page_type FROM pages WHERE url = %s", [cand])
-            if row:
-                pages = [row]
-                break
+
+        # Match on the normalized host rather than enumerating spellings.
+        # The candidate list used to be an exact-equality lookup against
+        # https://host/, https://www.host/ and http://host/ — and `pages`
+        # stores the home page as 'https://www.damcogroup.com' with NO
+        # trailing slash, so every candidate missed and the run reported
+        # "no targets" while exiting 0. Enumerating spellings only works if
+        # you enumerate all of them; normalizing both sides works always.
+        row = fetch_one(
+            """
+            SELECT id, url, page_type FROM pages
+             WHERE lower(regexp_replace(rtrim(url, '/'),
+                                        '^https?://(www\\.)?', '')) = lower(%s)
+             ORDER BY (page_type = 'home') DESC, length(url)
+             LIMIT 1
+            """,
+            [host],
+        )
+        if row:
+            pages = [row]
 
     if not pages:
-        logger.warning("No target pages resolved. Try --all-pillars or --url.")
+        # The old message pointed at --all-pillars, which is not a CLI flag —
+        # it is inferred when no target is given. Say what actually works.
+        logger.warning(
+            "No target pages resolved for domain=%r / url=%r / page_id=%r. "
+            "Run with no target flags to use pillar pages, or pass --url with "
+            "a URL that exists in `pages`.", domain, url, page_id)
         return {"status": "skipped", "reason": "no targets"}
 
     logger.info("Targeting %d page(s) for backlink refresh", len(pages))

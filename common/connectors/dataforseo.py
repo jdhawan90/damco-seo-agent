@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -68,6 +68,11 @@ REQUEST_TIMEOUT = 120
 # can have these other 2xx-range codes.
 OK_STATUS_CODE = 20000
 TASK_QUEUED_STATUS_CODES = (20000, 20100, 20200)
+
+# Returned by task_get while a task has not finished. Not failures — asking
+# again later is the correct response.
+#   40100 Task Not Found (yet)   40601 Task Handed   40602 Task In Queue
+TASK_IN_PROGRESS_STATUS_CODES = (40100, 40601, 40602)
 
 
 class DataForSEOError(RuntimeError):
@@ -287,33 +292,45 @@ def _poll_serp_tasks(task_ids: list[str], poll_interval: float = 15.0, max_wait:
 
     Default max_wait raised to 30 min — large batches (~100 tasks) routinely
     exceed the old 10-min limit, especially when DataForSEO is busy.
+
+    Asks about its own task ids; does NOT consult /tasks_ready.
+    ------------------------------------------------------------
+    This used to poll `/serp/google/organic/tasks_ready` and intersect that list
+    with `task_ids`. `tasks_ready` returns at most **1000 entries for the whole
+    account**, so once there are more tasks in flight than that — several
+    offerings tracked together, or a previous run's backlog uncollected — a
+    run's own ids are simply absent from the page and it waits out max_wait
+    reporting everything as pending.
+
+    That is not hypothetical. On 2026-07-29 a 100-keyword batch posted at
+    22:56:34 had its first results ready by 22:57:06 and all of them inside
+    three minutes; the poll gave up 30 minutes later reporting 100/100 pending,
+    with ~2,000 other tasks occupying the ready list.
+
+    Asking `task_get` for a specific id always answers about that id. It is free
+    — only task_post is billed — so the extra requests cost nothing, and a task
+    still queued comes back with a 4xxxx status quickly rather than a payload.
     """
     deadline = time.monotonic() + max_wait
     pending = set(task_ids)
     results: list[dict] = []
 
     while pending and time.monotonic() < deadline:
-        # tasks_ready lists tasks that have finished and are ready to be fetched.
-        # This is a GET endpoint (no payload).
-        ready = _get("/serp/google/organic/tasks_ready")
-        ready_ids = {t["id"] for t in ready.get("tasks", [])
-                     if t.get("status_code") == OK_STATUS_CODE
-                     for r in (t.get("result") or [])
-                     for _ in [r]}  # flatten — we just need presence signals
-        # Above is defensive; in practice ready["tasks"][0]["result"] is a list of {"id": ...}
-        # Normalize:
-        actual_ready: set[str] = set()
-        for task in ready.get("tasks", []):
-            for item in task.get("result") or []:
-                if "id" in item:
-                    actual_ready.add(item["id"])
-        matched = pending & actual_ready
-
-        for tid in list(matched):
-            # task_get is also a GET endpoint (task ID is in the URL path).
-            detail = _get(f"{SERP_TASK_GET_PATH}/{tid}")
-            results.extend(_parse_serp_results(detail))
-            pending.discard(tid)
+        for tid in sorted(pending):
+            if time.monotonic() >= deadline:
+                break
+            try:
+                detail = _get(f"{SERP_TASK_GET_PATH}/{tid}")
+            except DataForSEOError:
+                continue                      # still queued, or transient
+            # 40100/40601/40602 mean "not finished yet" — ask again next round.
+            if any(t.get("status_code") in TASK_IN_PROGRESS_STATUS_CODES
+                   for t in (detail.get("tasks") or [])):
+                continue
+            parsed = _parse_serp_results(detail)
+            if parsed:
+                results.extend(parsed)
+                pending.discard(tid)
 
         if pending:
             time.sleep(poll_interval)
@@ -622,7 +639,8 @@ def _rank_to_100(raw_rank) -> int | None:
         return None
 
 
-def get_backlinks(target: str, limit: int = 1000, mode: str = "as_is") -> list[dict]:
+def get_backlinks(target: str, limit: int = 1000, mode: str = "as_is",
+                  order_by: Sequence[str] | None = None) -> list[dict]:
     """
     Fetch backlinks pointing to a target URL or domain.
 
@@ -634,6 +652,27 @@ def get_backlinks(target: str, limit: int = 1000, mode: str = "as_is") -> list[d
         Max number of backlinks to return (DataForSEO supports up to 1000 per call).
     mode : {"as_is", "one_per_domain", "one_per_anchor"}
         DataForSEO aggregation mode. "as_is" returns every backlink.
+    order_by : sequence of str
+        DataForSEO sort expressions, e.g. ["rank,desc"]. Defaults to
+        highest-authority first — see below.
+
+    Why the default ordering matters
+    --------------------------------
+    Sort on `domain_from_rank`, not `rank`. The API already defaults to
+    `rank,desc` — passing it explicitly is a no-op, verified against live
+    responses — and `rank` scores the individual backlink, not the site it
+    comes from. Ordering that way returned 44 domains all in the DA 6-11 band
+    (apsense, anonup, gracebook.app) against an account summary of 2,522
+    referring domains.
+
+    `domain_from_rank,desc` returns what you actually want: pinterest (924),
+    community.fabric.microsoft.com (798), xing (772), bing (754).
+
+    Every consumer ranks or filters by authority, so a bounded `limit` should
+    buy the most authoritative rows, not an arbitrary slice.
+
+    Pass order_by=["domain_from_rank,asc"] explicitly if you are hunting toxic
+    links.
 
     Raises
     ------
@@ -642,7 +681,12 @@ def get_backlinks(target: str, limit: int = 1000, mode: str = "as_is") -> list[d
         SERP pay-per-query model). 40204 status comes back when it isn't
         active on the account.
     """
-    payload = [{"target": target, "limit": limit, "mode": mode}]
+    payload = [{
+        "target": target,
+        "limit": limit,
+        "mode": mode,
+        "order_by": list(order_by) if order_by else ["domain_from_rank,desc"],
+    }]
     data = _post("/backlinks/backlinks/live", payload)
 
     out: list[dict] = []
@@ -667,8 +711,23 @@ def get_backlinks(target: str, limit: int = 1000, mode: str = "as_is") -> list[d
                     "target_url": item.get("url_to"),
                     "anchor": item.get("anchor"),
                     "dofollow": item.get("dofollow"),
-                    "rank": item.get("rank"),             # raw DataForSEO authority, 0-1000
-                    "domain_rank": _rank_to_100(item.get("rank")),
+                    # Three different "rank" fields come back and they are not
+                    # interchangeable:
+                    #   rank              this individual backlink's score
+                    #   page_from_rank    the referring PAGE's score
+                    #   domain_from_rank  the referring DOMAIN's authority
+                    #
+                    # domain_authority must come from domain_from_rank. Reading
+                    # `rank` scored in.pinterest.com at 13 and
+                    # community.fabric.microsoft.com at 0, when their domain
+                    # authorities are 92 and 80. platform_finder's quality gate
+                    # rejects anything under DA 20, so that mapping threw away
+                    # every genuinely authoritative referrer and kept the
+                    # PBN links, whose backlink-level rank happens to sit in
+                    # the same single-digit band.
+                    "rank": item.get("rank"),                    # backlink, 0-1000
+                    "page_rank": _rank_to_100(item.get("page_from_rank")),
+                    "domain_rank": _rank_to_100(item.get("domain_from_rank")),
                     "first_seen": item.get("first_seen"),
                     "last_seen": item.get("last_seen"),
                     "raw": item,
