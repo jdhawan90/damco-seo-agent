@@ -64,7 +64,9 @@ def plain_text(body):
 
 def kw_count(body, phrase):
     t = plain_text(body).lower()
-    return len(re.findall(r'\b' + re.escape(phrase.strip().lower()) + r'\b', t))
+    # (?<!\w)...(?!\w) instead of \b so phrases starting/ending with a non-word
+    # char (".net development company", "c++") still match.
+    return len(re.findall(r'(?<!\w)' + re.escape(phrase.strip().lower()) + r'(?!\w)', t))
 
 
 def report(label, ok, detail=""):
@@ -132,15 +134,49 @@ def main():
     report("Each external source linked once (no repeat links)",
            (dupes == 0) or "warn", f"{dupes} repeat link(s)" if dupes else "")
 
+    # At most one external link per paragraph (Sources list is exempt).
+    body_no_sources = re.split(r'^#{2,3}\s+sources', body, flags=re.MULTILINE | re.IGNORECASE)[0]
+    para_over = 0
+    for para in re.split(r'\n\s*\n', body_no_sources):
+        ext_in_para = [u for _, u in re.findall(r'\[([^\]]+)\]\((https?://[^)\s]+)\)', para)
+                       if 'damcogroup.com' not in u and 'achieva.ai' not in u]
+        if len(ext_in_para) > 1:
+            para_over += 1
+    report("At most one external link per paragraph",
+           "warn" if para_over else True,
+           f"{para_over} paragraph(s) with >1 external link" if para_over else "")
+
+    # Anchor text should be short (3-5 words) and not a generic term/whole clause.
+    long_anchors = [t.strip() for t, _ in links if len(t.split()) > 6]
+    generic_anchors = [t.strip() for t, _ in links
+                       if t.strip().lower() in ('read', 'here', 'read more', 'learn more', 'click here', 'this')]
+    report("Anchor text short (<=5-6 words) and specific",
+           "warn" if (long_anchors or generic_anchors) else True,
+           '; '.join((long_anchors + generic_anchors)[:3]))
+
     has_sources = bool(re.search(r'^#{2,3}\s+sources', body, re.MULTILINE | re.IGNORECASE))
     fails += not has_sources
     report("Sources list section present", has_sources)
 
-    # --- CTA ---------------------------------------------------------------
+    # --- CTA + brand mentions (educational, not promotional) ---------------
     cta = meta.get('cta_url', '')
     cta_hits = body.count(cta) if cta else 0
-    ok = cta_hits >= 2
-    report(f"Brand CTA link embedded (2-3x): {cta}", ok if ok else "warn", f"{cta_hits}x")
+    # 1-2 CTA links: >=1 is fine, 2 is ideal, more than 2 reads promotional.
+    report(f"Brand CTA linked 1-2x (never more): {cta}",
+           "warn" if (cta_hits == 0 or cta_hits > 2) else True, f"{cta_hits}x")
+
+    # Brand name appears at most once, near the conclusion (listicles are exempt:
+    # they legitimately name the brand as ranked entity #1).
+    plain = plain_text(body)
+    brand_hits = re.findall(r'\b(?:damco|achieva)\b', plain, re.IGNORECASE)
+    is_listicle_title = bool(re.search(r'\btop\s+\d+\b|\bbest\b|\b\d+\s+(companies|tools|partners|platforms|vendors)\b', title))
+    if not is_listicle_title:
+        # position of the last brand mention should sit in the final ~25% of the text
+        last = max((m.start() for m in re.finditer(r'\b(?:damco|achieva)\b', plain, re.IGNORECASE)), default=-1)
+        near_end = last >= 0 and last >= 0.75 * len(plain)
+        report("Brand name mentioned once, near the conclusion",
+               "warn" if (len(brand_hits) > 1 or (brand_hits and not near_end)) else True,
+               f"{len(brand_hits)} mention(s)" + ("" if near_end or not brand_hits else ", not near end"))
 
     # --- Structure ---------------------------------------------------------
     is_linkedin = plat in ('linkedin', 'linkedin.com')
@@ -153,12 +189,14 @@ def main():
     report("No tables in article body (SEO team: no tabular data)", not table_rows,
            f"{len(table_rows)} table row(s) — rewrite as prose or a list" if table_rows else "")
 
-    # First-person voice allowed only on LinkedIn (Damco Style Guide + SEO team)
+    # First-person voice allowed only on LinkedIn (Damco Style Guide + SEO team).
+    # Strip URLs first so link paths like McKinsey's /our-insights/ don't false-match "our".
     if is_linkedin:
         report("First-person voice allowed (LinkedIn)", True)
     else:
-        fp = re.findall(r"\bI\b|\bI['’]m\b|\bI['’]ve\b", body)
-        fp += re.findall(r"\b(?:we|we['’]re|we['’]ve|our|ours|my)\b", body, re.IGNORECASE)
+        fp_text = re.sub(r'https?://[^\s)]+', ' ', body)
+        fp = re.findall(r"\bI\b|\bI['’]m\b|\bI['’]ve\b", fp_text)
+        fp += re.findall(r"\b(?:we|we['’]re|we['’]ve|our|ours|my)\b", fp_text, re.IGNORECASE)
         fails += bool(fp)
         report("No first-person voice (only LinkedIn may use it)", not fp,
                f"{len(fp)} first-person word(s): " + ', '.join(sorted(set(w.lower() for w in fp)))[:60]

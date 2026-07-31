@@ -72,13 +72,23 @@ House rules now in force:
 Start from the **direction/brief**: it tells you why this title was chosen and the angle
 the team wants. Let it set the thesis and decide which subtopics to lead with and which
 to keep brief. Then list the subtopics a searcher for this keyword expects. For a typical
-"Role of X" or service topic that includes: what X is (a definition callout), real use
+"Role of X" or service topic that includes: what X is, real use
 cases, benefits/outcomes, the development/implementation approach, the technologies
-involved, challenges, **compliance and security where relevant (e.g. HIPAA, GDPR for
-healthcare)**, current 2025-2026 trends (e.g. generative AI), and future adoption.
-Every item on this map becomes a section or is deliberately folded into one. Missing
-obvious subtopics is the #1 reason a draft is rejected. The thesis is the *spine* that
-connects these sections — not a replacement for them.
+involved, challenges, and **compliance and security where relevant (e.g. HIPAA, GDPR for
+healthcare)**. Every item on this map becomes a section or is deliberately folded into one.
+Missing obvious subtopics is the #1 reason a draft is rejected. The thesis is the *spine*
+that connects these sections — not a replacement for them.
+
+**Do not follow a fixed template.** Two habits have made recent batches read as
+formulaic — vary the structure so pieces do not all look alike:
+- **No obligatory "trends in 2025-2026 / the future of X" section.** Forward-looking or
+  trend material is welcome only where the specific topic genuinely calls for it, and even
+  then prefer to *weave* it into the relevant section rather than bolting a standalone
+  "What 2025 and 2026 Bring" / "The Future of X" section onto the end. Many strong pieces
+  need no dedicated future section at all. Never add one just to hit a pattern. (Note:
+  "The Future of X" is also a banned heading.)
+- Let the brief and the topic drive the section set and their order. Two articles on
+  related topics should not share the same skeleton.
 
 ### Step 2 — Research real statistics and EEAT signals
 Use WebSearch / WebFetch to find **5+ statistics from 2025-2026** (LinkedIn: 2024-2026)
@@ -99,11 +109,20 @@ Then:
 - `## Key Takeaways` (clear heading) immediately after the title, then a `> ` box of
   3-6 liftable bullets — on every channel **except LinkedIn**, which omits it entirely.
 - Intro (no heading): business problem + thesis, objective tone, keyword in first two paras.
-- `> ` definition callout for the central term where it helps.
+- `> ` definition callout: **optional, use judgment — not for every piece.** Add one
+  only when the central term is genuinely non-obvious to the target reader and a short
+  definition earns its place. Skip it when the term is common, self-explanatory, or
+  already clear from the intro (a CIO does not need "cloud migration" defined). It had
+  become a near-automatic fixture in almost every article; treat it as the exception, not
+  the default.
 - Body H2/H3 covering the Step-1 intent map; **at least one H2 contains the primary
   keyword**. Cite **3-4 distinct external sources max, each linked once** as
-  `[claim text](https://source-url)` — do not link every stat, do not exceed 4. **No FAQ
+  `[claim text](https://source-url)` — do not link every stat, do not exceed 4, and
+  place **no more than one external link in any single paragraph**. **No FAQ
   section** — fold those questions into the prose.
+- **Anchor text:** keep every link's anchor specific and short (**3-5 words**), for both
+  external and internal/CTA links. Do not hyperlink basic or irrelevant terms (a stat
+  phrase, a report name, or a service/offering — never a generic verb or whole clause).
 - Numbered lists for processes; convey comparisons as prose or short lists. **No tables.**
 - Perspective: second or third person on all channels except LinkedIn (first person is
   LinkedIn-only).
@@ -112,7 +131,11 @@ Then:
 - `## Sources` list: source name + URL + publication year for every cited stat.
 - `{{KEYWORD_FREQUENCY_TABLE}}` on its own line under a `## Keyword Frequency Table`
   heading (counts auto-compute — do not hand-write counts).
-Embed the brand CTA URL 2-3 times. Keep the whole piece 2000-2500 words.
+**Brand name and CTA (educational, not promotional):** mention the brand name
+(Damco / Achieva) **only once, in or near the conclusion** — repeated brand mentions make
+the piece read as promotional, and the target is educational content. Link the brand CTA
+URL **1-2 times, never more**, using a specific anchor built around the service/offering
+(3-5 words), not the brand name. Keep the whole piece 2000-2500 words.
 
 ### Step 4 — Audit (mechanical gate)
 ```
@@ -120,16 +143,24 @@ python .claude/skills/generate-article/scripts/audit.py <scratchpad>/<slug>.md
 ```
 Fix every `[FAIL]`, then re-run until it passes. Review `[WARN]`s and resolve the ones
 that apply. The audit checks: meta description, keyword usage + keyword-in-H2, stat
-count, sources section, CTA, Key Takeaways present (non-LinkedIn) / absent (LinkedIn),
-no FAQ section, no "click here" link text, listicle entity-per-heading + no placeholders,
-em dashes, banned buzzwords/jargon, banned headings, AI-tell openers, colon-not-emdash
-bullets, word count, and the keyword-table placeholder.
+count, sources section, CTA (1-2x), brand-name-once-near-conclusion, one-external-link-
+per-paragraph, anchor-text length/specificity, Key Takeaways present (non-LinkedIn) /
+absent (LinkedIn), no FAQ section, no "click here" link text, listicle entity-per-heading
++ no placeholders, em dashes, banned buzzwords/jargon, banned headings, AI-tell openers,
+colon-not-emdash bullets, word count, and the keyword-table placeholder.
 
 ### Step 5 — Self-review for voice (audit can't catch this)
 Read the draft once for the things the script can't measure: does it read like one
 thoughtful practitioner? Is sentence length varied? Are paragraphs uneven? Did you
 avoid over-resolving every paragraph? Are claims specific and named, not generic?
-Tighten anything that reads as assembled-from-parts.
+Tighten anything that reads as assembled-from-parts. Also check for **template fatigue**,
+the two patterns that made recent batches look alike:
+- Is there a definition callout that is not really needed? Cut it — the box is optional
+  and should be the exception, not a fixture in every piece.
+- Is there a tacked-on "trends in 2025-2026 / future of X" section added out of habit
+  rather than because the topic demands it? Remove it or fold the useful part into a
+  relevant section. Confirm the section set genuinely fits *this* topic and does not just
+  mirror the last article's skeleton.
 
 ### Step 6 — Convert to .docx
 ```
@@ -196,6 +227,13 @@ content as prose or a short list — never as a table. Functional only, never de
 - Follow the Damco Writing Style Guide on every channel (`reference/damco-style-guide.md`).
 - **No tables / tabular data** in the article body, any channel.
 - **No more than 3-4 external links**, each distinct source linked once. Brand CTA exempt.
+  **At most one external link per paragraph.**
+- **Anchor text is specific and short (3-5 words)** for external, internal, and CTA links.
+  Never hyperlink a basic/generic term or a whole clause.
+- **Brand name (Damco / Achieva) appears only once, in or near the conclusion.** The piece
+  is educational, not promotional; repeated brand mentions read as an ad.
+- **CTA target page linked 1-2 times, never more**, with a specific service/offering anchor
+  (not the brand name).
 - **First person only on LinkedIn**; all other channels are second or third person.
 - Meta description on every article.
 - Primary keyword in the title AND at least one H2.

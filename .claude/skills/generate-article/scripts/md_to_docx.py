@@ -126,7 +126,9 @@ def keyword_count(body, phrase):
     # strip markdown link targets so URLs don't inflate counts
     plain = re.sub(r'\]\((https?://[^)\s]+)\)', '] ', body)
     plain = re.sub(r'[#*>|`]', ' ', plain)
-    pattern = r'\b' + re.escape(phrase.strip().lower()) + r'\b'
+    # (?<!\w)...(?!\w) instead of \b so phrases starting/ending with a non-word
+    # char (".net development company", "c++") are counted correctly.
+    pattern = r'(?<!\w)' + re.escape(phrase.strip().lower()) + r'(?!\w)'
     return len(re.findall(pattern, plain.lower()))
 
 

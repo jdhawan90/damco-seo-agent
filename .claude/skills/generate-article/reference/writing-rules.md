@@ -11,8 +11,14 @@ audit script checks many of them mechanically, but write to them from the start.
   no data tables. Present comparisons as prose or short lists. (The SEO metadata block
   and keyword-frequency table are internal appendices, not article content.)
 - **No more than 3-4 external links.** Cite at most 3-4 distinct external sources, each
-  linked once. Do not repeat an external link or hyperlink every statistic. The brand
-  CTA is a self-link and is exempt from the cap.
+  linked once, with at most one external link per paragraph. Do not repeat an external
+  link or hyperlink every statistic. The brand CTA is a self-link and is exempt from the
+  external cap, but is governed by the brand/CTA rule below.
+- **Brand name once; CTA 1-2 times.** The article is educational, not promotional.
+  Mention the brand name (Damco / Achieva) **only once, in or near the conclusion**.
+  Link the brand CTA target page **1-2 times, never more**, using a specific
+  service/offering anchor (3-5 words), not the brand name. Repeated brand mentions or
+  more than two CTA links make the piece read as an ad.
 - **First person (I, we, our) only on LinkedIn.** Every other channel uses second person
   (you) or third person (Damco, the team). Never first person off LinkedIn.
 - **No FAQ section on any channel.** Do not add FAQ / "People Also Ask" / "Questions ...
@@ -113,9 +119,14 @@ consequence. Mix these.
   competitor blogs.
 - **Cap: no more than 3-4 external links.** Cite 3-4 distinct external sources and link
   each once. If several figures come from one source, link it once, not per-figure.
+  **No more than one external link in any single paragraph** — spread citations out.
   Verify the page is live
   before using it (a site that blocks bots but returns current content in search is
   live, not a 404). If a URL can't be confirmed live, drop the stat.
+- **Anchor text: specific and short (3-5 words), for every link — external, internal,
+  and CTA.** Hyperlink the stat phrase, the report/source name, or the service/offering,
+  never a generic verb ("read", "here") or a whole clause. Do not hyperlink basic or
+  irrelevant terms just to place a link.
 - **Never link to competitor websites.** The brand CTA is the only company page you
   may hyperlink.
 - Do not put publication years next to stats in the body. Put years in the Sources
@@ -131,6 +142,17 @@ consequence. Mix these.
    make the next feel necessary. Lists for steps/criteria; comparisons as prose or a
    short list, never a table.
    **No FAQ section** — fold those questions into the prose.
+   **Vary the structure; avoid a house template.** Two recurring patterns have made
+   pieces read as formulaic — do not default to either:
+   - **Definition callout (`> ` box) is optional.** Add one only when the central term is
+     genuinely non-obvious to the reader; skip it when the term is common or clear from
+     the intro. It is not a required element and should not appear in most pieces.
+   - **No obligatory trends/future section.** Do not bolt a standalone "What 2025 and
+     2026 Bring" / "The Future of X" section onto every article. Include forward-looking
+     material only where the topic truly calls for it, and prefer weaving it into a
+     relevant section over a dedicated one. ("The Future of X" is also a banned heading.)
+   Let the brief and topic decide the sections and their order; related articles should
+   not share an identical skeleton.
 5. **Conclusion (mandatory, 100-125 words):** summarize the argument in 2-3
    sentences, include the primary keyword and the brand CTA hyperlink, close on a
    forward-looking point (or, on Medium/LinkedIn, a question that invites discussion).

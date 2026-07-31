@@ -16,9 +16,15 @@ site that is not one of these, the user picks the closest profile.)
   Present comparisons as prose or short lists. (The SEO metadata block and the
   keyword-frequency table are internal editorial appendices, not article content.)
 - **No more than 3-4 external links (SEO team cap).** Cite at most 3-4 distinct
-  external sources, and link each one **once**. Do not repeat the same external link,
-  and do not hyperlink every statistic. The brand CTA is a self-link and does not count
-  toward the cap.
+  external sources, and link each one **once**, with **at most one external link per
+  paragraph**. Do not repeat the same external link, and do not hyperlink every
+  statistic. The brand CTA is a self-link and does not count toward the external cap.
+- **Anchor text: specific, 3-5 words, for every link.** Hyperlink the stat phrase, source
+  name, or service/offering — never a generic term or a whole clause.
+- **Brand name once; CTA 1-2 times (educational, not promotional).** Mention the brand
+  name (Damco / Achieva) **only once, in or near the conclusion**. Link the CTA target
+  page **1-2 times, never more**, with a specific service/offering anchor (not the brand
+  name). Repeated brand mentions read as an ad; the goal is educational content.
 - **First-person only on LinkedIn.** Use first-person or we-voice (I, we, our) *only*
   when the platform is LinkedIn. Every other channel uses second person (you) or third
   person (Damco, the team) — never first person.
@@ -45,7 +51,7 @@ site that is not one of these, the user picks the closest profile.)
   and conclusion. Secondary keywords for semantic coverage.
 - **Stats:** cite 3-4 distinct external primary sources max, each linked once. No tables.
 - **Voice:** Second person (you/your) throughout, consistent. No first person. No FAQ.
-- **CTA:** Embed brand CTA URL 2-3x naturally.
+- **CTA:** Link the brand CTA 1-2x with a specific service anchor; brand name once, near the close.
 
 ## Paid Guest Blog  (external publication, paid placement)
 
@@ -60,7 +66,7 @@ site that is not one of these, the user picks the closest profile.)
   opening, conclusion, and at least one H2.
 - **Stats:** 3-4 distinct external sources max, each linked once. No tables. No FAQ.
 - **Voice:** Second person or third person (Damco, the team). No first person.
-- **CTA:** 2-3x, lighter touch; external publications limit self-promotion.
+- **CTA:** 1-2x, lighter touch; external publications limit self-promotion. Brand name once, near the close.
 
 ## Guest Blog  /  Medium
 
@@ -76,7 +82,7 @@ site that is not one of these, the user picks the closest profile.)
 - **Keyword mechanics:** Natural, light. Primary keyword in title, opening, conclusion,
   and at least one H2.
 - **Stats:** 3-4 distinct external sources max, each linked once. No tables. No FAQ.
-- **CTA:** 2-3x, natural.
+- **CTA:** 1-2x, natural, specific service anchor. Brand name once, near the close.
 
 ## LinkedIn  (long-form thought-leadership article)
 
@@ -97,8 +103,10 @@ site that is not one of these, the user picks the closest profile.)
 - **No FAQ. No tables.**
 - **Stats:** 3-4 distinct external sources max, each linked once (2024-2026, primary).
 - **Listicles ("Top N…"):** see `listicle-rules.md`.
-- **CTA:** In the close and 1-2 other natural spots. Close with a POV or a direct
-  question to the reader.
+- **CTA:** Link the CTA 1-2x total (the close plus at most one natural spot), specific
+  service anchor. Brand name stays light. Close with a POV or a direct question to the
+  reader. (LinkedIn permits first-person voice, so "we/our" is fine, but do not turn the
+  post into repeated brand plugs.)
 
 ---
 
