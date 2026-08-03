@@ -349,7 +349,19 @@ def load_domains(domain: str | None = None) -> list[dict]:
                 continue
             sitemap_url = found[0]
             logger.info("Discovered sitemap for %s: %s", row["domain"], sitemap_url)
-        targets.append({"domain": row["domain"], "sitemap_url": sitemap_url})
+
+        # extra_sitemaps: sitemaps the root index does not reference.
+        # damcogroup.com's /insurance/ section is a separate WordPress
+        # multisite generating its own sitemap that nothing links to, so
+        # walking sitemap_url alone missed 47 product pages and, with them,
+        # the target of 314 tracked keywords. See migration 023.
+        urls = [sitemap_url] + [s for s in (row.get("extra_sitemaps") or [])
+                                if s and s != sitemap_url]
+        if len(urls) > 1:
+            logger.info("%s: %d sitemap(s) — %s", row["domain"], len(urls),
+                        ", ".join(u.split("/", 3)[-1] for u in urls))
+        targets.append({"domain": row["domain"], "sitemap_url": sitemap_url,
+                        "sitemap_urls": urls})
     return targets
 
 
@@ -358,10 +370,22 @@ def process_domain(entry: dict, dry_run: bool = False,
     """Process one domain end-to-end. Returns counters."""
     domain = entry["domain"]
     sitemap_url = entry["sitemap_url"]
+    sitemap_urls = entry.get("sitemap_urls") or [sitemap_url]
     logger.info("=== %s — %s ===", domain, sitemap_url)
 
-    # 1. Fetch + recursively walk sitemap
-    page_urls, sitemap_errors = collect_urls_from_sitemap(sitemap_url)
+    # 1. Fetch + recursively walk every declared sitemap for this domain.
+    #    Union, de-duplicated: a page listed in two sitemaps is one page.
+    page_urls: list[str] = []
+    sitemap_errors: list = []
+    seen_urls: set[str] = set()
+    for sm in sitemap_urls:
+        urls, errs = collect_urls_from_sitemap(sm)
+        fresh = [u for u in urls if u not in seen_urls]
+        seen_urls.update(fresh)
+        page_urls.extend(fresh)
+        sitemap_errors.extend(errs)
+        if len(sitemap_urls) > 1:
+            logger.info("  %s -> %d urls (%d new)", sm, len(urls), len(fresh))
     logger.info("Discovered %d unique URLs across sitemaps (%d sitemap fetch errors)",
                 len(page_urls), len(sitemap_errors))
 

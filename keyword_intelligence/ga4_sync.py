@@ -54,7 +54,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.connectors import ga4
 from common.database import connection, fetch_all, record_agent_run
-from common.tenant import profile
+from common.tenant import profile, strip_www
 
 
 logger = logging.getLogger("ga4_sync")
@@ -101,17 +101,42 @@ def build_page_index() -> tuple[dict[str, int], set[str]]:
         path = _norm_path(url)
         if not path:
             continue
-        host = urlparse(url).netloc.lower()
+        host = strip_www(urlparse(url).netloc.lower())
         seen.setdefault(path, set()).add(host)
+        # Key on (host, path). GA4 reports which property the traffic was on,
+        # so the domain is known at lookup time and the ambiguity that made
+        # dropping necessary does not exist.
+        index.setdefault((host, path), row["id"])
+        # Keep the bare path too, for the unambiguous majority — a GA4 row
+        # whose domain has no page of that path still resolves if exactly one
+        # owned domain has it.
         index.setdefault(path, row["id"])
 
+    # Paths on more than one owned domain: the bare-path key is a coin flip,
+    # so remove it. The (host, path) keys stay — those are exact.
+    #
+    # This used to drop the path entirely, which was over-cautious and
+    # expensive. `/`, `/contact-us` and `/about-us` exist on all three owned
+    # domains, so the homepage — 1,938 organic sessions and 41 conversions,
+    # 59% of everything the dashboard could not attribute — was thrown away
+    # for want of a disambiguator that ga4_landing_pages.domain was carrying
+    # all along.
     ambiguous = {path for path, hosts in seen.items() if len(hosts) > 1}
     for path in ambiguous:
         index.pop(path, None)
     if ambiguous:
-        logger.info("%d path(s) exist on more than one owned domain and are left "
-                    "unattributed rather than guessed", len(ambiguous))
+        logger.info("%d path(s) exist on more than one owned domain; resolved by "
+                    "domain where GA4 supplies one, dropped otherwise", len(ambiguous))
     return index, ambiguous
+
+
+def lookup_page_id(index: dict, domain: str, landing_page: str) -> int | None:
+    """Resolve a GA4 landing page to a `pages.id`, domain first."""
+    path = _norm_path(landing_page)
+    if not path:
+        return None
+    host = strip_www((domain or "").lower())
+    return index.get((host, path)) or index.get(path)
 
 
 def upsert_landing_pages(rows: list[dict], domain: str, window_end: date,
@@ -140,7 +165,7 @@ def upsert_landing_pages(rows: list[dict], domain: str, window_end: date,
         with conn.cursor() as cur:
             for r in rows:
                 lp = r.get("landingPage") or ""
-                page_id = index.get(_norm_path(lp))
+                page_id = lookup_page_id(index, domain, lp)
                 if page_id:
                     stats["matched"] += 1
                 else:
@@ -248,7 +273,8 @@ def run(days: int = ga4.DEFAULT_LOOKBACK_DAYS, all_channels: bool = False,
         ch = 0
         if dry_run:
             for r in (pages or []):
-                key = "matched" if index.get(_norm_path(r.get("landingPage") or "")) else "unmatched"
+                key = ("matched" if lookup_page_id(index, domain, r.get("landingPage") or "")
+                       else "unmatched")
                 lp[key] += 1
         else:
             lp = upsert_landing_pages(pages or [], domain, window_end, days, index)

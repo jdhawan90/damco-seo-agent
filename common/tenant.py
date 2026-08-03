@@ -266,7 +266,7 @@ def _load(slug: str | None = None) -> TenantProfile:
     # and silently absent for exactly that reason.
     domain_rows = fetch_all(
         "SELECT domain, role, sitemap_url, uses_www, "
-        "       ga4_property_id, gsc_site_url "
+        "       ga4_property_id, gsc_site_url, extra_sitemaps "
         "  FROM tenant_domains "
         " WHERE tenant_id = %s AND enabled ORDER BY role, domain",
         [tid],
