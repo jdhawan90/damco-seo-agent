@@ -52,6 +52,51 @@ MIN_CYCLE_SAMPLE = 300
 # never happened.
 CYCLE_MERGE_DAYS = 1
 
+# Movement and event tiles report only keywords the client marked high priority.
+#
+# Why filter at all
+# -----------------
+# The SERP event stream is 147,912 rows and a single cycle emits ~14,000
+# new_entrant plus ~14,000 drop_out events. Ranking that by magnitude surfaced
+# "outsource html conversion" falling from position 2, which the client's
+# reaction was, correctly: that is a low-priority keyword and I do not care.
+# Magnitude is not priority. An unfiltered movement tile is a list of the
+# largest numbers, not the most important ones.
+#
+# `keywords.importance` is now authoritative: 798 high, 363 medium, 745 low,
+# loaded from the client's own P1/P2/P3 tracker sheets. Before that it was an
+# import artifact — 1,111 rows flagged high, of which 404 turned out to be low.
+#
+# Tiles that COUNT the whole estate (visibility, position distribution,
+# coverage) deliberately do NOT filter: "we rank in the top 10 for 19% of
+# tracked keywords" must stay a statement about everything tracked. Only the
+# "what changed, act on this" tiles narrow.
+PRIORITY_TIERS = ("high",)
+
+
+def _priority_sql(alias: str = "k") -> str:
+    """`AND` fragment restricting to the reported priority tiers."""
+    tiers = ", ".join("'%s'" % t for t in PRIORITY_TIERS)
+    return f" AND {alias}.importance IN ({tiers}) "
+
+
+def priority_counts() -> dict:
+    """How the tracked set splits by priority — context for the filtered tiles."""
+    rows = fetch_all(
+        """
+        SELECT COALESCE(importance, 'unset') AS tier, count(*) AS n
+          FROM keywords WHERE status = 'active'
+         GROUP BY 1
+        """
+    )
+    by = {r["tier"]: r["n"] for r in rows}
+    return {
+        "tiers": by,
+        "reported": sum(by.get(t, 0) for t in PRIORITY_TIERS),
+        "total": sum(by.values()),
+        "reporting_tiers": list(PRIORITY_TIERS),
+    }
+
 
 def _stale(as_of: Any) -> dict:
     """Normalize a timestamp into the freshness contract every tile carries."""
@@ -283,14 +328,21 @@ def net_movement() -> dict:
     Improved vs declined, compared per keyword between its own two most recent
     measurements — not between two calendar dates. See the module docstring:
     date-vs-date would count unmeasured keywords as movement.
+
+    Restricted to high-priority keywords — see PRIORITY_TIERS. Movement on a
+    keyword nobody is working is noise, and it drowns out the rest.
     """
     row = fetch_one(
-        """
+        f"""
         WITH ranked AS (
-            SELECT keyword_id, date, rank_position,
-                   ROW_NUMBER() OVER (PARTITION BY keyword_id ORDER BY date DESC) AS rn
-              FROM keyword_rankings
-             WHERE source <> 'gsc' AND rank_position IS NOT NULL
+            SELECT r.keyword_id, r.date, r.rank_position,
+                   ROW_NUMBER() OVER (PARTITION BY r.keyword_id
+                                          ORDER BY r.date DESC) AS rn
+              FROM keyword_rankings r
+              JOIN keywords k ON k.id = r.keyword_id
+             WHERE r.source <> 'gsc' AND r.rank_position IS NOT NULL
+               AND k.status = 'active'
+               {_priority_sql()}
         ),
         pairs AS (
             SELECT c.keyword_id,
@@ -311,14 +363,18 @@ def net_movement() -> dict:
         return {"improved": 0, "declined": 0, "unchanged": 0, **_stale(None)}
 
     top = fetch_all(
-        """
+        f"""
         WITH ranked AS (
-            SELECT keyword_id, date, rank_position,
-                   ROW_NUMBER() OVER (PARTITION BY keyword_id ORDER BY date DESC) AS rn
-              FROM keyword_rankings
-             WHERE source <> 'gsc' AND rank_position IS NOT NULL
+            SELECT r.keyword_id, r.date, r.rank_position,
+                   ROW_NUMBER() OVER (PARTITION BY r.keyword_id
+                                          ORDER BY r.date DESC) AS rn
+              FROM keyword_rankings r
+              JOIN keywords k ON k.id = r.keyword_id
+             WHERE r.source <> 'gsc' AND r.rank_position IS NOT NULL
+               AND k.status = 'active'
+               {_priority_sql()}
         )
-        SELECT k.keyword, k.offering,
+        SELECT k.keyword, k.offering, k.importance,
                p.rank_position AS was, c.rank_position AS now,
                p.rank_position - c.rank_position AS gain
           FROM ranked c
@@ -336,6 +392,7 @@ def net_movement() -> dict:
         "net": row["improved"] - row["declined"],
         "avg_span_days": int(row["avg_span_days"]) if row["avg_span_days"] else None,
         "movers": top,
+        "priority": priority_counts(),
         **_stale(row["latest"]),
     }
 
@@ -410,14 +467,18 @@ def striking_distance(limit: int = 15) -> dict:
               FROM keyword_search_volume
              ORDER BY keyword_id, date DESC
         )
-        SELECT k.keyword, k.offering, r.rank_position AS position,
+        SELECT k.keyword, k.offering, k.importance, r.rank_position AS position,
                v.search_volume, k.google_sv AS volume_band, k.target_url
           FROM keyword_rankings r
           JOIN keywords k ON k.id = r.keyword_id
           LEFT JOIN vol v ON v.keyword_id = k.id
          WHERE r.source <> 'gsc' AND r.date = %s
            AND r.rank_position BETWEEN 11 AND 20
-         ORDER BY v.search_volume DESC NULLS LAST, r.rank_position
+         -- High priority first, then volume, then position. The count above is
+         -- the whole striking-distance set; this list is what to work on, and a
+         -- P1 at position 19 beats a P3 at 11.
+         ORDER BY (k.importance = 'high') DESC,
+                  v.search_volume DESC NULLS LAST, r.rank_position
          LIMIT %s
         """,
         [latest_date, limit],
@@ -648,11 +709,24 @@ def candidate_queue(limit: int = 12) -> dict:
 
 
 def competitor_movement(limit: int = 10) -> dict:
-    """Competitors gaining ground, from the SERP event stream."""
+    """
+    Competitors gaining ground on HIGH-PRIORITY keywords, from the event stream.
+
+    Restricted two ways, and both matter. `severity` was already filtered, but
+    severity is a property of the event, not of whether anyone cares about the
+    keyword: a competitor entering the top 10 on a keyword marked low priority
+    is still a 'high severity' new_entrant. Joining `keywords.importance` makes
+    the tile answer "who is taking ground that matters" instead of "who moved
+    most across 147,912 rows".
+
+    The window is 30 days back from the newest EVENT, not from today, and the
+    tile says so — if the tracker stops running, this silently becomes a
+    historical window rather than a current one.
+    """
     latest = fetch_one("SELECT max(event_date) AS d FROM competitor_serp_events")
     latest_date = latest["d"] if latest else None
     rows = fetch_all(
-        """
+        f"""
         SELECT c.competitor_domain, c.threat_tier,
                count(*) FILTER (WHERE e.event_type = 'position_gain') AS gains,
                count(*) FILTER (WHERE e.event_type = 'position_drop') AS drops,
@@ -660,8 +734,11 @@ def competitor_movement(limit: int = 10) -> dict:
                count(DISTINCT e.keyword_id) AS keywords
           FROM competitor_serp_events e
           JOIN competitors c ON c.id = e.competitor_id
+          JOIN keywords k    ON k.id = e.keyword_id
          WHERE e.event_date >= %s::date - 30
            AND e.severity IN ('critical', 'high', 'medium')
+           AND k.status = 'active'
+           {_priority_sql()}
          GROUP BY c.competitor_domain, c.threat_tier
          ORDER BY (count(*) FILTER (WHERE e.event_type = 'position_gain')
                  + count(*) FILTER (WHERE e.event_type = 'new_entrant')) DESC
@@ -669,7 +746,33 @@ def competitor_movement(limit: int = 10) -> dict:
         """,
         [latest_date, limit],
     ) if latest_date else []
-    return {"competitors": rows, "window_days": 30, **_stale(latest_date)}
+
+    # Our own movement on the priority set, from the same stream.
+    ours = fetch_all(
+        f"""
+        SELECT e.event_type, k.keyword, k.offering,
+               e.old_value ->> 'position' AS was,
+               e.new_value ->> 'position' AS now
+          FROM competitor_serp_events e
+          JOIN keywords k ON k.id = e.keyword_id
+         WHERE e.event_date >= %s::date - 30
+           AND e.event_type IN ('damco_drops_top_n', 'damco_enters_top_n')
+           AND k.status = 'active'
+           {_priority_sql()}
+         ORDER BY e.event_type, k.offering, k.keyword
+        """,
+        [latest_date],
+    ) if latest_date else []
+
+    return {
+        "competitors": rows,
+        "window_days": 30,
+        "window_from_event_date": latest_date.isoformat() if latest_date else None,
+        "we_entered": [r for r in ours if r["event_type"] == "damco_enters_top_n"],
+        "we_dropped": [r for r in ours if r["event_type"] == "damco_drops_top_n"],
+        "priority": priority_counts(),
+        **_stale(latest_date),
+    }
 
 
 def content_pipeline() -> dict:
