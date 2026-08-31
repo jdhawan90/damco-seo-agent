@@ -23,6 +23,11 @@ BANNED_WORDS = [
     'game-changer', 'game changer', 'cutting-edge', 'cutting edge', 'disrupt',
     'synergy', 'seamless', 'robust', 'empower', 'unlock', 'transform',
     'comprehensive', 'ecosystem', 'innovative', 'unicorn',
+    # no-ai-slop "banned outright" list (petergyang/no-ai-slop, MIT)
+    'delve', 'foster', 'utilize', 'facilitate', 'streamline', 'paradigm shift',
+    'tapestry', 'realm', 'beacon', 'multifaceted', 'meticulous', 'intricate',
+    'paramount', 'transformative', 'elevate', 'embark', 'supercharge', 'harness',
+    'ever-evolving', 'this is huge', 'this changes everything',
 ]
 # "leverage"/"scalable" are only flagged as verbs/without specifics -> WARN only
 SOFT_WORDS = ['leverage', 'scalable']
@@ -30,6 +35,18 @@ SOFT_WORDS = ['leverage', 'scalable']
 STYLE_PHRASES = [
     'thinking outside the box', 'core competency', 'for all intents and purposes',
     'low-hanging fruit', 'drill down', 'giving 110', 'actionable',
+]
+# no-ai-slop empty phrases, weasel attribution, and rhetorical setups -> WARN
+SLOP_PHRASES = [
+    "at the end of the day", "when it comes to", "at its core", "in the age of",
+    "in the world of", "the reality is", "the truth is", "going forward",
+    "in this article", "let's dive in", "let's dive into",
+    "experts agree", "studies show", "industry reports suggest", "many argue",
+    "widely regarded as", "here's the thing", "let me be clear", "i'll be honest",
+    "the uncomfortable truth", "what most people get wrong", "what nobody tells you",
+    "the part everyone misses", "stands as a testament", "marks a pivotal moment",
+    "plays a vital role", "what if i told you", "plot twist", "the key point is",
+    "as you can see", "in conclusion", "overall,",
 ]
 AI_OPENERS = [
     "it is worth noting", "it's worth noting", "it is important to note",
@@ -254,6 +271,18 @@ def main():
 
     phrase_hits = [p for p in STYLE_PHRASES if p in low]
     report("No style-guide empty phrases/cliches", "warn" if phrase_hits else True, ', '.join(phrase_hits))
+
+    # no-ai-slop empty phrases / weasel attribution / rhetorical setups -> WARN
+    slop_hits = [p for p in SLOP_PHRASES if p in low]
+    report("No AI-slop phrases (no-ai-slop)", "warn" if slop_hits else True,
+           ', '.join(sorted(set(slop_hits))[:6]))
+
+    # no-ai-slop binary contrasts ("it's not X, it's Y" / "not just X but Y") -> WARN
+    binary = re.findall(
+        r"(?:\bit'?s not\b|\bthat'?s not\b|\bisn'?t\b|\bis not\b|\bnot just\b)"
+        r"[^.?!\n]{2,60}?(?:,\s*(?:it'?s|it is)\b|\bbut\b)", low)
+    report("No binary-contrast constructions (state Y directly)",
+           "warn" if binary else True, f"{len(binary)} found" if binary else "")
 
     # Accessibility: link text must be meaningful, never "click here"
     badlink = re.findall(r'\[\s*(click here|click|here|read more|learn more)\s*\]\(', low)

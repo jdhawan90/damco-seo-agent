@@ -78,7 +78,10 @@ consequence. Mix these.
 - **No filler adverbs:** cut extremely, very, definitely, truly, simply.
 - **No clichés/buzzwords:** game-changer, cutting-edge, disrupt, synergy, seamless,
   robust, empower, unlock, transform, comprehensive, ecosystem, innovative,
-  leverage (verb), scalable (without specifics).
+  leverage (verb), scalable (without specifics). **Plus the full no-ai-slop banned list**
+  (delve, foster, utilize, facilitate, streamline, tapestry, realm, beacon, meticulous,
+  intricate, paramount, transformative, elevate, embark, supercharge, harness, and more —
+  see `no-ai-slop.md`).
 - **No corporate padding:** "In order to," "It is important to note that," "For the
   purpose of," "As mentioned above."
 

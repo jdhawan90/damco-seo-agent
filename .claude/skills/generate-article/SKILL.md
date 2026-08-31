@@ -52,7 +52,8 @@ make sure each still appears in at least one heading or the opening.
 ### Step 0 — Load the rules
 Read `reference/damco-style-guide.md` (the Damco Writing Style Guide — applies to every
 channel), `reference/channel-profiles.md` (the row for this platform),
-`reference/writing-rules.md` (applies to all channels), and — if the title is a
+`reference/writing-rules.md` (applies to all channels), `reference/no-ai-slop.md` (the
+anti-AI-slop word/phrase/pattern list — applies to every channel), and — if the title is a
 listicle ("Top N", "Best", "N Companies/Tools/Partners") — `reference/listicle-rules.md`.
 
 House rules now in force:
@@ -147,13 +148,22 @@ count, sources section, CTA (1-2x), brand-name-once-near-conclusion, one-externa
 per-paragraph, anchor-text length/specificity, Key Takeaways present (non-LinkedIn) /
 absent (LinkedIn), no FAQ section, no "click here" link text, listicle entity-per-heading
 + no placeholders, em dashes, banned buzzwords/jargon, banned headings, AI-tell openers,
-colon-not-emdash bullets, word count, and the keyword-table placeholder.
+colon-not-emdash bullets, no-ai-slop banned words + slop phrases + binary contrasts,
+word count, and the keyword-table placeholder.
 
-### Step 5 — Self-review for voice (audit can't catch this)
+### Step 5 — Self-review for voice + no-ai-slop pass (audit can't catch all of it)
 Read the draft once for the things the script can't measure: does it read like one
 thoughtful practitioner? Is sentence length varied? Are paragraphs uneven? Did you
 avoid over-resolving every paragraph? Are claims specific and named, not generic?
-Tighten anything that reads as assembled-from-parts. Also check for **template fatigue**,
+Tighten anything that reads as assembled-from-parts.
+
+Then run the **no-ai-slop pass** against `reference/no-ai-slop.md`: scan for and cut the
+patterns the regex can't reliably catch — colon reveals ("The best part: it learns"),
+superficial `-ing` analysis ("highlighting the commitment to..."), importance puffery
+("marks a pivotal moment"), interpretive metadiscourse ("the key point is"), fake-profound
+kickers, and dramatic fragmentation. Apply the portability test to every generic sentence:
+if it could move unchanged to another company or product, replace it with a specific fact,
+mechanism, or consequence. Make verbs do the work. Also check for **template fatigue**,
 the two patterns that made recent batches look alike:
 - Is there a definition callout that is not really needed? Cut it — the box is optional
   and should be the exception, not a fixture in every piece.
