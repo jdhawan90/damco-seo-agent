@@ -259,7 +259,14 @@ def build_detailed_sheet(wb: Workbook, data: dict) -> None:
             ranking = kw_data["rankings"].get(d)
             if ranking:
                 pos = ranking["position"]
-                val = pos if pos is not None else "N/F"
+                # -1 sentinel = depth inconclusive; show "?" so readers know
+                # it's not a real position of "-1". NULL = confirmed off top-100.
+                if pos is None:
+                    val = "N/F"
+                elif pos == -1:
+                    val = "?"
+                else:
+                    val = pos
                 # Track most recent URL that ranked
                 if ranking.get("url_found") and (latest_seen_date is None or d > latest_seen_date):
                     latest_url_found = ranking["url_found"]
@@ -269,8 +276,9 @@ def build_detailed_sheet(wb: Workbook, data: dict) -> None:
             ws.cell(row=i, column=j, value=val)
             _style_data_cell(ws, i, j)
 
-            # Color-code positions
-            if isinstance(val, int):
+            # Color-code positions. Only real integer positions get colored;
+            # "?" and "N/F" stay neutral so inconclusive rows don't look green.
+            if isinstance(val, int) and val > 0:
                 cell = ws.cell(row=i, column=j)
                 if val <= 10:
                     cell.fill = GOOD_FILL
@@ -358,12 +366,23 @@ def build_movement_sheet(wb: Workbook, data: dict) -> None:
         ws.cell(row=1, column=col, value=h)
     _style_header(ws, 1, len(headers))
 
+    def _display(pos: int | None) -> str | int:
+        # -1 = depth inconclusive; NULL = confirmed off top-100.
+        if pos is None:
+            return "N/F"
+        if pos == -1:
+            return "?"
+        return pos
+
     movements: list[tuple[str, str | None, int | None, int | None, int | None]] = []
     for kw, kw_data in by_keyword.items():
         prev_rank = kw_data["rankings"].get(prev_date, {}).get("position")
         curr_rank = kw_data["rankings"].get(curr_date, {}).get("position")
 
-        if prev_rank is not None and curr_rank is not None:
+        # Only compute movement between two measured integer positions.
+        # Either endpoint at -1 or NULL leaves change=None.
+        if (prev_rank is not None and prev_rank > 0
+                and curr_rank is not None and curr_rank > 0):
             change = prev_rank - curr_rank  # positive = improved
         else:
             change = None
@@ -375,9 +394,9 @@ def build_movement_sheet(wb: Workbook, data: dict) -> None:
     for i, (kw, offering, prev_r, curr_r, change) in enumerate(movements, 2):
         ws.cell(row=i, column=1, value=kw).border = THIN_BORDER
         ws.cell(row=i, column=2, value=offering).border = THIN_BORDER
-        ws.cell(row=i, column=3, value=prev_r if prev_r is not None else "N/F")
+        ws.cell(row=i, column=3, value=_display(prev_r))
         _style_data_cell(ws, i, 3)
-        ws.cell(row=i, column=4, value=curr_r if curr_r is not None else "N/F")
+        ws.cell(row=i, column=4, value=_display(curr_r))
         _style_data_cell(ws, i, 4)
 
         if change is not None:
@@ -495,14 +514,22 @@ def build_gsc_sheet(wb: Workbook, data: dict) -> None:
         ctr = gsc.get("ctr")
 
         # Gap: positive = SERP rank is better than GSC avg (good), negative = worse
+        # Only compute when SERP has a real integer position (not -1 or NULL).
         gap = None
-        if serp_pos is not None and gsc_pos is not None:
+        if serp_pos is not None and serp_pos > 0 and gsc_pos is not None:
             gap = round(gsc_pos) - serp_pos  # positive means GSC sees you worse
 
         ws.cell(row=i, column=1, value=kw).border = THIN_BORDER
         ws.cell(row=i, column=2, value=kw_data["offering"]).border = THIN_BORDER
 
-        ws.cell(row=i, column=3, value=serp_pos if serp_pos is not None else "N/A")
+        # -1 (depth inconclusive) shows as "?"; NULL/absent shows as "N/A".
+        if serp_pos is None:
+            serp_display: str | int = "N/A"
+        elif serp_pos == -1:
+            serp_display = "?"
+        else:
+            serp_display = serp_pos
+        ws.cell(row=i, column=3, value=serp_display)
         _style_data_cell(ws, i, 3)
 
         ws.cell(row=i, column=4, value=round(gsc_pos) if gsc_pos is not None else "N/A")
@@ -561,7 +588,10 @@ def compute_narrative_facts(data: dict) -> dict:
         row = kd["rankings"].get(latest, {}) if latest else {}
         pos = row.get("position")
         buckets[row.get("bucket") or "not-found"] += 1
-        if pos is not None:
+        # Only real measured integer positions feed narrative aggregates.
+        # -1 (depth inconclusive) and NULL are both excluded — a "position -1"
+        # or a missing measurement would corrupt averages and top-N lists.
+        if pos is not None and pos > 0:
             per_offering[kd["offering"] or "(unassigned)"].append(pos)
             if 11 <= pos <= 20:
                 striking.append((kw, kd["offering"], pos))
@@ -573,7 +603,9 @@ def compute_narrative_facts(data: dict) -> dict:
         gsc_pos = None
         if gsc_series:
             gsc_pos = gsc_series[max(gsc_series)].get("position")
-        if pos is not None and gsc_pos is not None and abs(round(gsc_pos) - pos) >= 5:
+        if (pos is not None and pos > 0
+                and gsc_pos is not None
+                and abs(round(gsc_pos) - pos) >= 5):
             gsc_gaps.append((kw, pos, float(gsc_pos)))
 
     improved: list[tuple[str, str | None, int]] = []
@@ -582,7 +614,9 @@ def compute_narrative_facts(data: dict) -> dict:
         for kw, kd in by_keyword.items():
             p = kd["rankings"].get(prev, {}).get("position")
             c = kd["rankings"].get(latest, {}).get("position")
-            if p is None or c is None:
+            # Skip if either endpoint is missing or the -1 sentinel — movement
+            # requires two real integer positions.
+            if p is None or p <= 0 or c is None or c <= 0:
                 continue
             delta = p - c
             if delta > 0:

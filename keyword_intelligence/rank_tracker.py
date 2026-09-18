@@ -70,6 +70,16 @@ BATCH_SIZE = 100
 # which scans the full SERP).
 TOP_N = 10
 
+# Minimum organic-item count for us to trust a "damco not found" as "damco is
+# beyond position 100". We ask DataForSEO for depth=200 so the API almost
+# always returns 100+ organic items — enough to prove damco is beyond 100 when
+# we don't find it. On the rare SERP where Google's own cap returns fewer
+# organic items than this threshold, "not found" is inconclusive: if we have a
+# prior known rank for the keyword, we preserve it rather than overwriting with
+# a false NULL. Contract: NULL means "we searched at least 100 organic
+# positions and damco wasn't there" — never "we didn't look deep enough".
+DEPTH_CONFIDENCE_THRESHOLD = 100
+
 # Owned domains and the heuristic categorization buckets (big tech,
 # aggregators, informational) now come from the tenant profile —
 # profile().owns() and profile().vocab(...). Loaded lazily inside the
@@ -83,6 +93,8 @@ TOP_N = 10
 def rank_bucket(position: int | None) -> str:
     if position is None:
         return "not-found"
+    if position == -1:
+        return "inconclusive"
     if position <= 5:
         return "1-5"
     if position <= 10:
@@ -483,7 +495,14 @@ def fetch_rankings(keywords: list[dict], queue: str) -> dict[int, dict]:
         logger.info("Batch %d/%d: %d keywords", batch_num, total_batches, len(batch))
 
         try:
-            serp_results = get_serp_rankings(batch, queue=queue)
+            # depth=200: DataForSEO's price is per task, not per depth, so we
+            # ask for enough organic items to always see position 100 even when
+            # Google's SERP is heavy on non-organic slots (AI Overview + PAA +
+            # video + related searches). At depth=100 many competitive
+            # commercial SERPs returned only 26-78 organic items — enough to
+            # capture top-10 competitors but not enough to prove damco is
+            # beyond position 100.
+            serp_results = get_serp_rankings(batch, queue=queue, depth=200)
         except DataForSEOError as exc:
             logger.error("DataForSEO batch %d failed: %s", batch_num, exc)
             for kw_text in batch:
@@ -569,7 +588,13 @@ def diff_top_n(previous_top: list[dict], current_top: list[dict]) -> list[dict]:
 
 def diff_damco(prev_pos: int | None, curr_pos: int | None) -> list[dict]:
     events: list[dict] = []
-    in_top = lambda p: p is not None and p <= TOP_N
+    # -1 is the depth-inconclusive sentinel — treat it the same as None (no
+    # measurement) rather than as "position -1" which would be < TOP_N.
+    if prev_pos == -1:
+        prev_pos = None
+    if curr_pos == -1:
+        curr_pos = None
+    in_top = lambda p: p is not None and p > 0 and p <= TOP_N
     if in_top(curr_pos) and not in_top(prev_pos):
         events.append({
             "event_type": "damco_enters_top_n",
@@ -829,9 +854,32 @@ def process_keyword(cur, *, keyword_id: int, raw: dict | None,
     prev_features = prev["serp_features"] if prev else []
     prev_damco_pos = prev["damco_position"] if prev else None
 
-    # 3. Compute diffs
+    # 2a. Depth-inconclusive guard. If damco wasn't found AND the API returned
+    # fewer organic items than our confidence threshold, we cannot conclude
+    # damco fell out of the top 100 — it may just be beyond the returned depth.
+    # Sentinel value -1 is written to both keyword_rankings.rank_position and
+    # keyword_serp_snapshots.damco_position to mark "measured but depth
+    # inconclusive". This distinguishes from NULL (confirmed off top-100) and
+    # from a positive integer (measured position).
+    # Downstream consumers must treat rank_position = -1 as "unmeasured" —
+    # exclude it from top-10 counts, movement diffs, and bucket assignments.
+    depth_inconclusive = False
+    if damco_pos is None and len(organic_items) < DEPTH_CONFIDENCE_THRESHOLD:
+        logger.warning(
+            "keyword_id=%s: only %d organic items returned; damco not in them. "
+            "Writing sentinel -1 (depth inconclusive; prior rank was %s).",
+            keyword_id, len(organic_items),
+            prev_damco_pos if prev_damco_pos is not None else "unknown",
+        )
+        damco_pos = -1
+        damco_url = None
+        depth_inconclusive = True
+
+    # 3. Compute diffs. Skip damco diff when we preserved the prior rank —
+    # there is no measured movement to attribute.
     competitor_events = diff_top_n(prev_top, current_top) if prev else []
-    damco_events      = diff_damco(prev_damco_pos, damco_pos) if prev else []
+    damco_events      = ([] if depth_inconclusive
+                         else (diff_damco(prev_damco_pos, damco_pos) if prev else []))
     feature_events    = diff_serp_features(prev_features, serp_features) if prev else []
     all_events = competitor_events + damco_events + feature_events
 
@@ -873,6 +921,8 @@ def process_keyword(cur, *, keyword_id: int, raw: dict | None,
         "events_written":   events_written,
         "touched_cids":     touched_cids,
         "ai_present":       ai_present,
+        "depth_inconclusive": depth_inconclusive,
+        "organic_count":    len(organic_items),
     }
 
 
@@ -945,13 +995,16 @@ def print_summary(results: list[dict], run_date: date) -> None:
         buckets[b] = buckets.get(b, 0) + 1
 
     print("  Bucket Distribution:")
-    for bucket_name in ["1-5", "5-10", "10-20", "20-50", "50+", "not-found"]:
+    for bucket_name in ["1-5", "5-10", "10-20", "20-50", "50+", "not-found", "inconclusive"]:
         count = buckets.get(bucket_name, 0)
         bar = "#" * count
-        print(f"    {bucket_name:>10}  {count:>3}  {bar}")
+        print(f"    {bucket_name:>12}  {count:>3}  {bar}")
     print()
 
-    striking = [r for r in results if r["rank_position"] and 11 <= r["rank_position"] <= 20]
+    # Striking distance = 11-20 by measured position. -1 (inconclusive) and
+    # None (not found) both fail the truthy check, so they're excluded.
+    striking = [r for r in results if r["rank_position"] and r["rank_position"] > 0
+                and 11 <= r["rank_position"] <= 20]
     if striking:
         print(f"  STRIKING DISTANCE (positions 11-20): {len(striking)} keywords")
         for r in sorted(striking, key=lambda x: x["rank_position"]):
@@ -1035,6 +1088,7 @@ def run(offering: str | None = None, queue: str = "standard", dry_run: bool = Fa
     total_events = 0
     total_touched_cids: set[int] = set()
     snapshots_written = 0
+    depth_inconclusive_count = 0
 
     if dry_run:
         logger.info("DRY RUN — skipping all writes")
@@ -1077,6 +1131,8 @@ def run(offering: str | None = None, queue: str = "standard", dry_run: bool = Fa
                     snapshots_written += 1
                     total_events       += pk["events_written"]
                     total_touched_cids |= pk["touched_cids"]
+                    if pk.get("depth_inconclusive"):
+                        depth_inconclusive_count += 1
                     results.append({
                         "keyword":       kw["keyword"],
                         "rank_position": pk["damco_position"],
@@ -1118,7 +1174,11 @@ def run(offering: str | None = None, queue: str = "standard", dry_run: bool = Fa
 
     duration = time.monotonic() - start_time
     total = len(results)
-    found = sum(1 for r in results if r["rank_position"] is not None)
+    # "found" = a real, measured position in top 100. Excludes the -1 sentinel
+    # (inconclusive) and NULL (confirmed off top-100).
+    found = sum(1 for r in results
+                if r["rank_position"] is not None and r["rank_position"] > 0)
+    inconclusive = sum(1 for r in results if r["rank_position"] == -1)
     err_count = sum(1 for r in results if r.get("error"))
 
     if not dry_run:
@@ -1129,23 +1189,26 @@ def run(offering: str | None = None, queue: str = "standard", dry_run: bool = Fa
             errors=api_errors,
             duration_seconds=round(duration, 2),
             metadata={
-                "run_date":            run_date.isoformat(),
-                "queue":               queue,
-                "offering_filter":     offering,
-                "force_all":           force_all,
-                "total_keywords":      total,
-                "found":               found,
-                "not_found":           total - found - err_count,
-                "errors":              err_count,
-                "events_emitted":      total_events,
-                "competitors_touched": len(total_touched_cids),
+                "run_date":                run_date.isoformat(),
+                "queue":                   queue,
+                "offering_filter":         offering,
+                "force_all":               force_all,
+                "total_keywords":          total,
+                "found":                   found,
+                "not_found":               total - found - inconclusive - err_count,
+                "inconclusive":            inconclusive,
+                "errors":                  err_count,
+                "events_emitted":          total_events,
+                "competitors_touched":     len(total_touched_cids),
+                "depth_inconclusive":      depth_inconclusive_count,
             },
         )
 
     print_summary(results, run_date)
     print(f"  Keywords tracked:     {total}")
     print(f"  {profile().brand_name + ' found:':<22}{found}")
-    print(f"  Not found:            {total - found - err_count}")
+    print(f"  Not found:            {total - found - inconclusive - err_count}   (confirmed off top-100)")
+    print(f"  Inconclusive (-1):    {inconclusive}   (SERP returned <{DEPTH_CONFIDENCE_THRESHOLD} organic items; cannot confirm 100+)")
     print(f"  Errors:               {err_count}")
     print(f"  SERP snapshots:       {snapshots_written}")
     print(f"  Events emitted:       {total_events}")

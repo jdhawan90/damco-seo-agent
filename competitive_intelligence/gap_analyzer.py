@@ -178,11 +178,19 @@ def load_offering_data(offering: str) -> dict:
 def classify(damco_pos: int | None, competitors: list[dict]) -> tuple[str, int]:
     """
     Returns (gap_type, base_severity) for one keyword.
-        - 'none'         — we're in top 10
+        - 'none'         — we're in top 10, or the measurement is inconclusive
         - 'coverage_gap' — we're missing from top 100
         - 'displacement' — we're at 11-30
         - 'low_priority' — we're at 31+ (lower-prio displacement)
+
+    The -1 sentinel from keyword_intelligence.rank_tracker means "damco was
+    not found in a shallow SERP" — we cannot tell if this is a real gap or
+    just a measurement blind spot. Return 'none' (no action) so the gap
+    analysis doesn't chase a keyword we haven't actually measured; a fresh
+    rank_tracker run should resolve the sentinel to a real position or NULL.
     """
+    if damco_pos == -1:
+        return "none", 0
     if damco_pos is not None and 1 <= damco_pos <= 10:
         return "none", 0
     if damco_pos is None:
@@ -617,7 +625,12 @@ def analyze_offering(offering: str, with_narrative: bool) -> tuple[
         "displacement":   counter.get("displacement", 0),
         "low_priority":   counter.get("low_priority", 0),
     }
-    in_top10_with_pos = sum(1 for g in gaps if g["damco_position"] and g["damco_position"] <= 10)
+    # Guard against the -1 depth-inconclusive sentinel — truthy but not a real
+    # top-10 position. `> 0` excludes both None and -1 cleanly.
+    in_top10_with_pos = sum(
+        1 for g in gaps
+        if g["damco_position"] and g["damco_position"] > 0 and g["damco_position"] <= 10
+    )
     totals["in_top10"] = in_top10_with_pos
     # Recount: coverage = damco_position is None AND >=1 competitor in top 10
     # The Counter approach already covers this, so leave totals as is for non-top10 categories.

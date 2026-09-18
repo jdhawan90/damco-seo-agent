@@ -49,11 +49,13 @@ A production agent that monitors Damco's competitors — tracks their SERP posit
 |---|---|
 | `competitors` | Master domain registry — `category`, `threat_tier`, DA, country, `keyword_appearance_count`, `offering_appearance_count`, `is_tracked` mute flag |
 | `competitor_rankings` | Per-keyword top 10 history with `url_title`, `page_type`, `serp_features_owned`, `is_new_entrant`, `previous_position`, `position_change` |
-| `keyword_serp_snapshots` | Per-keyword SERP context — AI Overview presence + cited domains, SERP features, damco position |
+| `keyword_serp_snapshots` | Per-keyword SERP context — AI Overview presence + cited domains, SERP features, damco position (tri-state: integer, NULL, or -1; see below) |
 | `competitor_serp_events` | Append-only event stream — `new_entrant`, `drop_out`, `position_gain/drop`, `damco_*`, `serp_feature_*`, `threat_tier_changed`. Severity-tagged. **This is the trigger feed for everything this agent reacts to.** |
 | `mv_offering_competition` | Materialized rollup — share of voice %, avg top-10 position, threat tier per (offering, competitor). Refreshed at end of each rank-tracker cycle. |
 
-Never write to the SERP-side tables from this agent — that's `keyword_intelligence/`'s job. This agent **only reads** SERP data. It writes to `competitor_changes` (content diffs from `competitor_monitor.py` and `content_monitor.py`), `competitor_pages`, `competitor_published_urls`, `competitor_backlinks`, and may update curation fields on `competitors` (`is_tracked`, `category`, `notes`, `metadata`).
+Never write to the SERP-side tables from this agent — that's `keyword_intelligence/`'s job. This agent **only reads** SERP data.
+
+**`damco_position` and `keyword_rankings.rank_position` are tri-state.** Positive integer = measured position, `NULL` = confirmed off top-100, `-1` = depth inconclusive (SERP returned <100 organic items; we cannot prove damco is beyond 100). Every filter here must treat `-1` explicitly — `damco_position <= 10` will match `-1` and misclassify inconclusive keywords as top-10. Use `damco_position BETWEEN 1 AND N` for top-N buckets and `damco_position > 0` for "any real measured position". See `keyword_intelligence/CLAUDE.md > Storage contract for rank_position` for the full contract. It writes to `competitor_changes` (content diffs from `competitor_monitor.py` and `content_monitor.py`), `competitor_pages`, `competitor_published_urls`, `competitor_backlinks`, and may update curation fields on `competitors` (`is_tracked`, `category`, `notes`, `metadata`).
 
 ## Scope boundary
 

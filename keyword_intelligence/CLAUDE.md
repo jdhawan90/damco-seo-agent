@@ -42,6 +42,34 @@ If you need something the profile doesn't expose, **add it to the profile** — 
 
 If the user asks for anything out of scope, tell them which agent owns it and don't attempt it here.
 
+## Storage contract for `rank_position` (read this before writing any query)
+
+`keyword_rankings.rank_position` and `keyword_serp_snapshots.damco_position` are tri-state. Downstream code that treats them as "integer or NULL" will misclassify the third state.
+
+| Stored value | Meaning | How to filter in SQL |
+|---|---|---|
+| Positive integer (`1`, `22`, `87`, …) | Damco's measured position in Google's top 100 | `rank_position > 0` or `BETWEEN 1 AND N` |
+| `NULL` | Damco is **confirmed off** top-100 (SERP returned ≥100 organic items and damco wasn't in them) | `rank_position IS NULL` |
+| `-1` | Depth inconclusive — the SERP returned fewer than `DEPTH_CONFIDENCE_THRESHOLD` (=100) organic items, so we cannot prove damco is beyond 100. Common on competitive commercial SERPs where AI Overview + PAA + video eat the display slots. | `rank_position = -1` |
+
+**Safe query patterns:**
+
+- Real measured positions: `rank_position > 0` (excludes NULL and -1)
+- Real top-N: `rank_position BETWEEN 1 AND N` (excludes NULL and -1; -1 <= N would wrongly match with a bare `<=` predicate)
+- Confirmed coverage gaps only: `rank_position IS NULL` (excludes -1 on purpose — inconclusive is not a confirmed gap)
+- Anything not currently ranked (gap OR inconclusive): `(rank_position IS NULL OR rank_position = -1)`
+
+**Unsafe query patterns that will misclassify -1:**
+
+- `rank_position <= 10` — counts `-1` as top-10 (very wrong)
+- `rank_position IS NOT NULL` — counts `-1` as measured (partially wrong)
+- `p.rank_position <> c.rank_position` for movement — treats `1 -> -1` as a real drop from #1 to "-1" (very wrong)
+- `rank_bucket()` on `-1` returns the string `"inconclusive"` — it does NOT fall into `"1-5"`.
+
+**Why we chose `-1` over other options:** overwriting a real prior rank with NULL corrupts trend analysis for weeks; leaving the row unwritten breaks "did the tracker run today" checks; adding a `confidence` column requires a migration and a rewrite of every existing filter. `-1` is a sentinel we can add without a schema change, provided every consumer respects the tri-state contract above.
+
+Regenerating stale rows: a normal `python -m keyword_intelligence.rank_tracker --all` re-measures everything and resolves any old `-1` sentinel to either a real position or NULL. The tracker also asks DataForSEO for `depth=200` (was 100), which yields 100+ organic items for most queries and pushes the -1 count toward zero.
+
 ## Operating contract (Read → Process → Write → Notify)
 
 Every action follows the standard agent lifecycle:

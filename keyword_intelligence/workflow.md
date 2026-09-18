@@ -233,11 +233,15 @@ Pick the right query depending on what's asked:
 
 - **Summary per executive:**
   ```sql
+  -- BETWEEN 1 AND 10, not <= 10: rank_position=-1 is the depth-inconclusive
+  -- sentinel and satisfies <= 10 incorrectly. See CLAUDE.md > "Storage
+  -- contract for rank_position".
   SELECT e.name,
          count(DISTINCT k.id) AS total_keywords,
-         count(DISTINCT k.id) FILTER (WHERE kr.rank_position <= 10) AS top_10,
+         count(DISTINCT k.id) FILTER (WHERE kr.rank_position BETWEEN 1 AND 10) AS top_10,
          count(DISTINCT k.id) FILTER (WHERE kr.rank_position BETWEEN 11 AND 20) AS striking,
-         count(DISTINCT k.id) FILTER (WHERE kr.rank_position IS NULL) AS not_found
+         count(DISTINCT k.id) FILTER (WHERE kr.rank_position IS NULL) AS not_found,
+         count(DISTINCT k.id) FILTER (WHERE kr.rank_position = -1)   AS inconclusive
   FROM seo_executives e
   JOIN executive_keyword_assignments a ON a.executive_id = e.id
   JOIN keywords k ON k.id = a.keyword_id

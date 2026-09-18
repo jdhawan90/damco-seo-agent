@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # Best position is the darkest step on light, the brightest on dark.
 # "not-found" is deliberately NOT on the ramp — absence of a position is not a
 # weaker position, and colouring it blue implies a rank it does not have.
-BUCKET_ORDER = ("1-5", "5-10", "10-20", "20-50", "50+", "not-found")
+BUCKET_ORDER = ("1-5", "5-10", "10-20", "20-50", "50+", "not-found", "inconclusive")
 
 # A date is treated as a measurement cycle only if it covers a meaningful
 # share of the tracked set. Without this the trendline shows a cliff every
@@ -156,8 +156,7 @@ def visibility() -> dict:
     cur = fetch_one(
         """
         SELECT count(*) AS measured,
-               count(*) FILTER (WHERE rank_position IS NOT NULL
-                                  AND rank_position <= 10) AS in_top_10
+               count(*) FILTER (WHERE rank_position BETWEEN 1 AND 10) AS in_top_10
           FROM keyword_rankings
          WHERE source <> 'gsc' AND date = %s
         """,
@@ -190,10 +189,10 @@ def visibility() -> dict:
             )
             SELECT count(*) FILTER (WHERE date = ANY(%s)) AS n_now,
                    round(100.0 * count(*) FILTER (
-                       WHERE date = ANY(%s) AND rank_position <= 10)
+                       WHERE date = ANY(%s) AND rank_position BETWEEN 1 AND 10)
                        / NULLIF(count(*) FILTER (WHERE date = ANY(%s)), 0), 1) AS pct_now,
                    round(100.0 * count(*) FILTER (
-                       WHERE date = ANY(%s) AND rank_position <= 10)
+                       WHERE date = ANY(%s) AND rank_position BETWEEN 1 AND 10)
                        / NULLIF(count(*) FILTER (WHERE date = ANY(%s)), 0), 1) AS pct_prev
               FROM keyword_rankings
              WHERE source <> 'gsc'
@@ -271,8 +270,7 @@ def _visibility_trend() -> list[dict]:
         row = fetch_one(
             """
             SELECT count(*) AS measured,
-                   count(*) FILTER (WHERE rank_position IS NOT NULL
-                                      AND rank_position <= 10) AS in_top_10
+                   count(*) FILTER (WHERE rank_position BETWEEN 1 AND 10) AS in_top_10
               FROM keyword_rankings
              WHERE source <> 'gsc' AND date = ANY(%s)
             """,
@@ -340,7 +338,10 @@ def net_movement() -> dict:
                                           ORDER BY r.date DESC) AS rn
               FROM keyword_rankings r
               JOIN keywords k ON k.id = r.keyword_id
-             WHERE r.source <> 'gsc' AND r.rank_position IS NOT NULL
+             -- rank_position > 0 excludes NULL (confirmed off top-100) and
+             -- -1 (depth inconclusive). Movement is only meaningful between
+             -- two measured integer positions.
+             WHERE r.source <> 'gsc' AND r.rank_position > 0
                AND k.status = 'active'
                {_priority_sql()}
         ),
@@ -370,7 +371,8 @@ def net_movement() -> dict:
                                           ORDER BY r.date DESC) AS rn
               FROM keyword_rankings r
               JOIN keywords k ON k.id = r.keyword_id
-             WHERE r.source <> 'gsc' AND r.rank_position IS NOT NULL
+             -- rank_position > 0: exclude NULL (off top-100) and -1 (inconclusive)
+             WHERE r.source <> 'gsc' AND r.rank_position > 0
                AND k.status = 'active'
                {_priority_sql()}
         )
@@ -516,12 +518,12 @@ def share_of_voice(limit: int = 10) -> dict:
         """
         SELECT k.offering,
                count(*) AS tracked,
-               count(*) FILTER (WHERE r.rank_position <= 10) AS in_top_10
+               count(*) FILTER (WHERE r.rank_position BETWEEN 1 AND 10) AS in_top_10
           FROM keyword_rankings r
           JOIN keywords k ON k.id = r.keyword_id
          WHERE r.source <> 'gsc' AND r.date = %s AND k.offering IS NOT NULL
          GROUP BY k.offering
-         ORDER BY count(*) FILTER (WHERE r.rank_position <= 10) DESC
+         ORDER BY count(*) FILTER (WHERE r.rank_position BETWEEN 1 AND 10) DESC
         """,
         [latest_date],
     ) if latest_date else []
@@ -557,6 +559,10 @@ def coverage_gaps(limit: int = 12) -> dict:
     if not latest_date:
         return {"total": 0, "by_offering": [], **_stale(None)}
 
+    # Confirmed coverage gaps only: rank_position IS NULL means "damco is
+    # beyond top-100 in a SERP where we searched deep enough to prove it".
+    # Excludes rank_position = -1 (depth inconclusive) — those cases might
+    # still be ranking; the mid-SERP data was just missing.
     rows = fetch_all(
         """
         SELECT k.offering,
@@ -847,7 +853,9 @@ def url_mismatch(limit: int = 15) -> dict:
                ) AS unassigned
           FROM keyword_rankings r
           JOIN keywords k ON k.id = r.keyword_id
-         WHERE r.source <> 'gsc' AND r.rank_position IS NOT NULL AND r.date = %s
+         -- rank_position > 0: only rows with a measured integer position
+         -- (excludes NULL and -1 inconclusive)
+         WHERE r.source <> 'gsc' AND r.rank_position > 0 AND r.date = %s
         """,
         [latest_date],
     )
@@ -859,7 +867,7 @@ def url_mismatch(limit: int = 15) -> dict:
           FROM keyword_rankings r
           JOIN keywords k ON k.id = r.keyword_id
          WHERE r.source <> 'gsc' AND r.date = %s
-           AND r.rank_position IS NOT NULL
+           AND r.rank_position > 0
            AND k.target_url IS NOT NULL AND r.url_found IS NOT NULL
            AND starts_with(k.target_url, 'http')
            AND lower(rtrim(r.url_found, '/')) <> lower(rtrim(k.target_url, '/'))

@@ -212,6 +212,10 @@ def load_coverage_gap_keywords(offering: str | None, limit: int) -> list[int]:
          LEFT JOIN latest_gsc lg ON lg.keyword_id = k.id
          LEFT JOIN keyword_rankings gsc ON gsc.keyword_id = k.id AND gsc.date = lg.d AND gsc.source = 'gsc'
              WHERE k.status = 'active'
+               -- IS NULL only (excludes rank_position = -1 depth-inconclusive
+               -- rows). Briefs should only be spent on confirmed coverage
+               -- gaps — an inconclusive keyword might still be ranking and
+               -- deserves a fresh SERP re-check before a brief is generated.
                AND serp.rank_position IS NULL
     """
     if offering:
