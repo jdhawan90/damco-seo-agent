@@ -33,6 +33,7 @@ outputs/archive/*
 # The rendered dashboard has the figures baked in — rankings, competitor
 # analysis and conversion data. It is a build artifact, not source.
 outputs/dashboard/*
+outputs/internal_linker/*
 !outputs/**/.gitkeep
 
 # Local databases and dumps

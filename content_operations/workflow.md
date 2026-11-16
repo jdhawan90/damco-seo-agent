@@ -432,6 +432,80 @@ Returns nothing until `compliance_checker` runs for the first time.
 
 ---
 
+## Internal Linker
+
+Three-phase pipeline: **crawl → detect → report**. The weekly job is a single
+command; the three sub-commands exist so an operator can rerun any phase in
+isolation.
+
+### Weekly run (recommended)
+
+```bash
+python -m content_operations.internal_linker run
+```
+
+Does: crawl every owned-domain sitemap URL (~1,500 pages, ~90 min at
+`rate_limit_sec=1.0`), run both detectors, export an Excel to
+`outputs/internal_linker/internal_link_suggestions_<date>.xlsx`.
+
+### Just the crawl
+
+```bash
+python -m content_operations.internal_linker crawl                 # full
+python -m content_operations.internal_linker crawl --max-pages 50  # testing
+python -m content_operations.internal_linker crawl --rate-limit 0.5  # faster, be careful
+```
+
+`--rate-limit SEC` sets the per-host delay (default 1.0s, polite). `--no-robots`
+ignores robots.txt and should only be used for diagnostics.
+
+### Just the detectors
+
+```bash
+python -m content_operations.internal_linker detect
+```
+
+Runs two detectors against the current link graph (freshness check warns if
+the last crawl is more than 14 days old):
+
+| Detector | Picks | Writes to |
+|---|---|---|
+| `striking_distance_support` | Keywords at positions 11-20 that have a target URL and GSC impressions. For each, selects up to 5 owned pages in the same offering that already rank top-20 and don't already link to the target. | `internal_link_suggestions` |
+| `blog_to_money_page` | Blog pages whose offering is known and that don't already link to any service page in that offering. Suggests the strongest service page (ranks for most top-10 keywords in the offering). | `internal_link_suggestions` |
+
+### Just the report
+
+```bash
+python -m content_operations.internal_linker report                   # 'new' only
+python -m content_operations.internal_linker report --include-all      # also applied/ignored/stale
+python -m content_operations.internal_linker report --out path.xlsx    # custom destination
+```
+
+### Writer feedback loop
+
+Editors mark a suggestion `applied` or `ignored` directly in the DB:
+
+```sql
+UPDATE internal_link_suggestions
+   SET status = 'applied', applied_at = CURRENT_TIMESTAMP,
+       notes  = 'added to <section> on <date>'
+ WHERE id = <row id>;
+```
+
+Future detector runs will not re-emit the same `(detector, from_url, to_url)`
+pair with status `applied` or `ignored`. If the writer applied the link and
+the next crawl sees it on the source page, the detector naturally stops
+suggesting it (the existing-link filter catches it).
+
+### Known data-coverage caveat
+
+The `blog_to_money_page` detector needs `pages.offering` set on blog rows.
+Today only 3 of 1,058 blog pages have an offering assigned — the detector
+will remain thin until a backfill runs. Scope it as a follow-up; nothing
+inside the internal linker can fix it.
+
+---
+
 ## What to always do
 
 1. Apply migrations before anything else. No tenant row, no run — and without migration 013 the brief outlines fall back to a generic skeleton.

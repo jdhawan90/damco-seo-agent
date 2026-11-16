@@ -347,6 +347,29 @@ CATALOGUE: tuple[AgentSpec, ...] = (
         writes=(),
         notes="Counting briefs into buckets. Never a model.",
     ),
+    AgentSpec(
+        name="content_operations.internal_linker.crawl",
+        title="Internal Linker — Crawl",
+        kind="deterministic",
+        summary="Walks tenant sitemaps and persists every outbound link per page "
+                "(source, target, anchor, rel, is_internal) into internal_links.",
+        reads=("tenant_domains",),
+        writes=("internal_links",),
+        notes="Uses common.connectors.crawler. Respects robots.txt by default; "
+              "weekly cadence recommended. Never a model.",
+    ),
+    AgentSpec(
+        name="content_operations.internal_linker.detect",
+        title="Internal Linker — Detectors",
+        kind="deterministic",
+        summary="Two detectors — striking_distance_support (positions 11-20 need "
+                "support links) and blog_to_money_page (blogs missing a link to "
+                "their offering's service page). Writes to internal_link_suggestions.",
+        reads=("internal_links", "keyword_rankings", "keywords", "pages"),
+        writes=("internal_link_suggestions",),
+        notes="Suggestions capped at 5 sources per striking-distance target. "
+              "Writer-set status (applied/ignored) is preserved on re-runs.",
+    ),
 
     # -- offpage_links -------------------------------------------------------
     AgentSpec(
@@ -436,8 +459,11 @@ def discover_agent_names() -> dict[str, str]:
         d = REPO_ROOT / folder
         if not d.is_dir():
             continue
-        for path in sorted(d.glob("*.py")):
-            if path.name == "__init__.py":
+        # rglob so nested subpackages (e.g. internal_linker/crawl.py) get
+        # discovered. Agent authors can organise related modules into a
+        # subpackage without hiding from the registry.
+        for path in sorted(d.rglob("*.py")):
+            if path.name == "__init__.py" or path.name == "__main__.py":
                 continue
             try:
                 tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -486,7 +512,10 @@ def validate() -> list[str]:
             problems.append(f"{rel} declares AGENT_NAME={name!r} but it is not in CATALOGUE")
 
     for spec in CATALOGUE:
-        expected = REPO_ROOT / spec.folder / f"{spec.module}.py"
+        # spec.module may itself contain dots for nested subpackages
+        # (e.g. "internal_linker.crawl" -> internal_linker/crawl.py).
+        module_rel = spec.module.replace(".", "/") + ".py"
+        expected = REPO_ROOT / spec.folder / module_rel
         if not expected.exists():
             problems.append(f"CATALOGUE has {spec.name!r} but {expected.relative_to(REPO_ROOT)} does not exist")
         elif spec.name not in discovered and spec.name != "keyword_intelligence.reports":
