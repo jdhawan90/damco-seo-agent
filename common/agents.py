@@ -348,6 +348,21 @@ CATALOGUE: tuple[AgentSpec, ...] = (
         notes="Counting briefs into buckets. Never a model.",
     ),
     AgentSpec(
+        name="content_operations.pages_backfiller",
+        title="Pages Backfiller — hydrate + classify",
+        kind="deterministic",
+        summary="Two-phase repair of the pages table: crawl pages with NULL "
+                "title/meta and write them, then score URL + title + meta "
+                "against tenant offering vocabulary to fill pages.offering.",
+        reads=("pages", "tenant_offerings"),
+        writes=("pages", "offering_backfill_log"),
+        notes="Only touches NULL fields — writer-set values are never "
+              "overridden. Weekly cadence; new blog rows get picked up "
+              "automatically. Pure rule-based (word-boundary regex on tokens). "
+              "No model calls. Feeds `internal_linker.detect` by giving "
+              "`blog_to_money_page` real offering data to work with.",
+    ),
+    AgentSpec(
         name="content_operations.internal_linker.crawl",
         title="Internal Linker — Crawl",
         kind="deterministic",

@@ -2,7 +2,7 @@
 
 You are the **Content Operations Agent** for Damco Group's SEO operations. When this folder is the working directory, you operate as this agent — not as a general assistant.
 
-## Status: 5 modules built (4 original + internal_linker)
+## Status: 6 modules built (4 original + internal_linker + pages_backfiller)
 
 Build sequence:
 
@@ -13,6 +13,7 @@ Build sequence:
 | `compliance_checker.py` | **Built** — Crawls a submitted draft URL and scores it against the brief across 12 weighted dimensions (primary kw placement/density, secondary kw coverage, title/meta length, H1 structure, outline coverage vs brief, internal links incl. brief-suggested targets, image alt coverage, schema markup, word count vs brief target, AEO signals). 0-100 score, per-issue pass/warn/fail, persisted to `compliance_checks`. Pure rule-based, no LLM. |
 | `concentration_checker.py` | **Built** — Aggregates `content_briefs` over a rolling window (default 90 days) and flags over-concentration across 4 dimensions (offering, audience_stage, page_type, intent). Surfaces underweight offerings and emits concrete next-step commands. Pure SQL aggregation, no LLM. |
 | `internal_linker/` | **Built and validated (pilot)** — 3-phase pipeline (`crawl → detect → report`) over a dedicated submodule. Crawl refreshes the owned-domain link graph (`internal_links`). Two detectors (`striking_distance_support`, `blog_to_money_page`) write to `internal_link_suggestions` and preserve writer-set status across reruns. Weekly cadence. Pure rule-based; no LLM. See `workflow.md § Internal Linker`. |
+| `pages_backfiller.py` | **Built and validated (pilot: 200 blogs, 76% assigned, 13% ambiguous, 11% no_match)** — Two-phase repair of the `pages` table that fills the NULL-metadata and NULL-offering gaps left by the sitemap importer. `hydrate` crawls pages and writes title/meta/canonical/lang/word_count; `classify` scores URL + title + meta against the offering token vocabulary (word-boundary regex, so "ai" doesn't sneak into "maintain") and writes `pages.offering` when the top offering scores ≥3 AND beats the runner-up by ≥2. Every attempt is logged to `offering_backfill_log` for audit. Only touches NULL fields; writer-set values are never overridden. Feeds `internal_linker.detect.blog_to_money_page` with data to work on. See `workflow.md § Pages Backfiller`. |
 
 ## What you will be
 

@@ -506,6 +506,106 @@ inside the internal linker can fix it.
 
 ---
 
+## Pages Backfiller
+
+Two-phase repair of the `pages` table. When sitemap_validator imports URLs
+it only writes the URL — not title, meta_description or offering. This
+module fills those gaps so downstream agents (especially
+`internal_linker.detect.blog_to_money_page`) have real data to work on.
+
+### Full weekly run
+
+```bash
+python -m content_operations.pages_backfiller run --page-type blog
+```
+
+Does hydrate + classify in sequence. Blog-type focus is the current
+priority (1,055 of 1,058 blog pages had offering=NULL). Drop
+`--page-type blog` to run against every page_type.
+
+### Just hydrate
+
+```bash
+python -m content_operations.pages_backfiller hydrate --page-type blog
+python -m content_operations.pages_backfiller hydrate --max-pages 50       # testing
+python -m content_operations.pages_backfiller hydrate --force              # refresh >90-day rows
+```
+
+Fetches rows where `title IS NULL` (with `--force`, also rows whose
+`last_audited` is older than 90 days) and writes title,
+meta_description, canonical_url, lang, word_count, last_audited.
+Default rate limit is 1.0s; measured ~1.3s per page end-to-end
+including parse. A full 1,055-blog run takes ~22 minutes.
+
+### Just classify
+
+```bash
+python -m content_operations.pages_backfiller classify --page-type blog
+python -m content_operations.pages_backfiller classify --dry-run             # audit log only
+python -m content_operations.pages_backfiller classify --min-score 5         # strict
+python -m content_operations.pages_backfiller classify --min-lead 3          # less ambiguous
+```
+
+Scores every page where `offering IS NULL` against each offering's
+token vocabulary. Rules:
+
+| Weight | Signal |
+|---:|---|
+| 3 per token | URL path match |
+| 2 per token | Title match |
+| 2 per token | Meta description match |
+
+A page is **assigned** when the top-scoring offering reaches ≥ `MIN_SCORE`
+(default 3) AND leads the runner-up by ≥ `MIN_LEAD` (default 2).
+Otherwise `ambiguous` (close call) or `no_match` (floor not reached).
+
+Every attempt — including dry-runs — writes a row to
+`offering_backfill_log` with the full scoring breakdown. Spot-check
+decisions:
+
+```sql
+SELECT p.url, bl.decision, bl.top_offering, bl.top_score,
+       bl.runner_up_offering, bl.runner_up_score,
+       bl.confidence_score,
+       bl.url_matches, bl.title_matches, bl.meta_matches
+  FROM offering_backfill_log bl
+  JOIN pages p ON p.id = bl.page_id
+ WHERE bl.run_date > CURRENT_DATE - 1
+ ORDER BY bl.id DESC;
+```
+
+### Quick status
+
+```bash
+python -m content_operations.pages_backfiller stats
+```
+
+Prints coverage per page_type (how many rows, how many have an
+offering, how many have a title) and recent-decision counts.
+
+### Known classifier quirks
+
+**damcodigital.com vertical blogs.** The classifier currently uses offering
+tokens only — no domain prior. A blog like `digital-marketing-for-insurance`
+scores Insurance tokens higher than Marketing-Services tokens (14 vs 7) and
+gets assigned Insurance, when the Damco convention would class it as
+Marketing Services (service we provide, not the client vertical). If this
+becomes annoying, add a per-domain weight-multiplier policy in
+`tenant_policies` — the hook is already in `profile()`.
+
+**AI-adjacent SEO content.** Blog titles mentioning "AI" (e.g. "AIO
+Strategy") assign to the AI offering even when the topic is really Marketing
+Services + AI tooling. Same mechanism; would be fixed with a domain prior.
+
+Correcting a wrong assignment manually:
+```sql
+-- The backfiller NEVER overrides a human-set offering, so this is permanent.
+UPDATE pages SET offering = 'Marketing Services', updated_at = CURRENT_TIMESTAMP
+ WHERE url = 'https://damcodigital.com/blog/...';
+```
+
+---
+
 ## What to always do
 
 1. Apply migrations before anything else. No tenant row, no run — and without migration 013 the brief outlines fall back to a generic skeleton.
