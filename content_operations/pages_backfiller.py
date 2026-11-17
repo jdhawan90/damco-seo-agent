@@ -288,16 +288,24 @@ class ClassifyStats:
 
 
 def _score_page(page: dict,
-                matchers_by_offering: dict[str, list[tuple[str, re.Pattern[str]]]]
+                matchers_by_offering: dict[str, list[tuple[str, re.Pattern[str]]]],
+                domain_boosts: dict[str, dict[str, int]] | None = None,
                 ) -> tuple[dict[str, int],
                            dict[str, list[str]], dict[str, list[str]],
-                           dict[str, list[str]]]:
+                           dict[str, list[str]],
+                           dict[str, int]]:
     """
-    Return (scores, url_hits, title_hits, meta_hits).
+    Return (scores, url_hits, title_hits, meta_hits, boost_applied).
 
     URL text is the path segment lowercased and spaces/dashes/underscores
     normalised to spaces — otherwise a slug like "salesforce-crm-tips" would
     only match "salesforce-crm-tips" literally, never "salesforce".
+
+    `domain_boosts` encodes editorial intent per domain (see tenant_policies
+    .pages_offering_priors). When the URL's host matches a keyed domain, each
+    listed offering gets its score bumped by the stated amount. The bump is
+    captured in `boost_applied` so the audit log can show exactly why a
+    classification tipped.
     """
     url_text = _url_text(page["url"])
     title_text = (page.get("title") or "")
@@ -321,7 +329,20 @@ def _score_page(page: dict,
         url_hits[offering_name]   = u
         title_hits[offering_name] = t
         meta_hits[offering_name]  = m
-    return scores, url_hits, title_hits, meta_hits
+
+    # Domain prior — editorial intent beats pure-token scoring on properties
+    # with a single dominant offering (e.g. damcodigital.com → Marketing
+    # Services, achieva.ai → Salesforce).
+    boost_applied: dict[str, int] = {}
+    if domain_boosts:
+        host = _host_of(page["url"])
+        if host and host in domain_boosts:
+            for off, bump in (domain_boosts[host] or {}).items():
+                if not bump:
+                    continue
+                boost_applied[off] = int(bump)
+                scores[off] = scores.get(off, 0) + int(bump)
+    return scores, url_hits, title_hits, meta_hits, boost_applied
 
 
 def _url_text(url: str) -> str:
@@ -332,6 +353,17 @@ def _url_text(url: str) -> str:
         path = url
     path = path.lower().replace("-", " ").replace("_", " ").replace("/", " ")
     return re.sub(r"\s+", " ", path).strip()
+
+
+def _host_of(url: str) -> str | None:
+    """Lowercase host without leading www. Returns None on parse failure."""
+    try:
+        host = (urlparse(url).netloc or "").lower()
+    except Exception:
+        return None
+    if host.startswith("www."):
+        host = host[4:]
+    return host or None
 
 
 def _decide(scores: dict[str, int]) -> tuple[str, str | None, int,
@@ -375,21 +407,60 @@ def classify(*, page_type: str | None = None,
              dry_run: bool = False,
              max_pages: int | None = None,
              min_lead: int = MIN_LEAD,
-             min_score: int = MIN_SCORE) -> dict:
+             min_score: int = MIN_SCORE,
+             reclassify_domain: str | None = None) -> dict:
     """
     Classify every page where offering IS NULL. Writes pages.offering in place
     (unless --dry-run) and a log row per attempt.
+
+    `reclassify_domain` is a one-off reset for a specific host: if set, any
+    page on that host (matched by `url ILIKE '%<host>%'`) gets `pages.offering`
+    cleared BEFORE candidate selection, so the classifier can pick a new
+    answer under the current policy. Use this after tuning
+    `pages_offering_priors` for the domain in question.
     """
     start = time.monotonic()
     stats = ClassifyStats()
 
-    # Pull candidates.
+    # Optional reset for a specific domain — scope the scope of a re-tune to
+    # a single host rather than wiping every classifier output.
+    if reclassify_domain:
+        host_like = f"%{reclassify_domain}%"
+        with connection() as conn:
+            cur = conn.cursor()
+            sql_clear = "UPDATE pages SET offering = NULL, updated_at = CURRENT_TIMESTAMP WHERE url ILIKE %s"
+            clear_params: list = [host_like]
+            if page_type:
+                sql_clear += " AND page_type = %s"
+                clear_params.append(page_type)
+            if dry_run:
+                cur.execute(
+                    "SELECT count(*) FROM pages WHERE url ILIKE %s"
+                    + (" AND page_type = %s" if page_type else ""),
+                    clear_params,
+                )
+                would_clear = cur.fetchone()[0]
+                logger.info("dry-run: would clear %d page offering(s) on domain %r",
+                            would_clear, reclassify_domain)
+            else:
+                cur.execute(sql_clear, clear_params)
+                logger.info("cleared %d page offering(s) on domain %r before reclassify",
+                            cur.rowcount, reclassify_domain)
+            conn.commit()
+
+    # Pull candidates. In dry-run reclassify mode, surface the domain rows
+    # even though they still have a non-NULL offering so the preview is
+    # meaningful. Outside that mode: strict "offering IS NULL" as before.
     sql = """
         SELECT id, url, title, meta_description, page_type
           FROM pages
-         WHERE offering IS NULL
+         WHERE (offering IS NULL
     """
     params: list = []
+    if dry_run and reclassify_domain:
+        sql += " OR url ILIKE %s"
+        params.append(f"%{reclassify_domain}%")
+    sql += ")"
     if page_type:
         sql += " AND page_type = %s"
         params.append(page_type)
@@ -399,19 +470,27 @@ def classify(*, page_type: str | None = None,
         params.append(max_pages)
     candidates = fetch_all(sql, params)
     stats.seen = len(candidates)
-    logger.info("classify: %d candidates (page_type=%s, dry_run=%s)",
-                stats.seen, page_type, dry_run)
+    logger.info("classify: %d candidates (page_type=%s, dry_run=%s, reclassify_domain=%r)",
+                stats.seen, page_type, dry_run, reclassify_domain)
 
     matchers_by_offering = _compile_matchers()
-    logger.info("classifier vocabulary: %d offerings, "
-                "%d patterns total",
-                len(matchers_by_offering),
-                sum(len(v) for v in matchers_by_offering.values()))
+    # Load the domain-prior policy once. Shape:
+    #   {"domain_boosts": {"<host>": {"<offering>": <int bump>}}}
+    priors = profile().policy("pages_offering_priors", {}) or {}
+    domain_boosts: dict[str, dict[str, int]] = priors.get("domain_boosts") or {}
+    logger.info(
+        "classifier vocabulary: %d offerings, %d patterns total; "
+        "domain priors loaded for %d domain(s): %s",
+        len(matchers_by_offering),
+        sum(len(v) for v in matchers_by_offering.values()),
+        len(domain_boosts),
+        sorted(domain_boosts.keys()),
+    )
 
     with connection() as conn:
         cur = conn.cursor()
         for page in candidates:
-            scores, u, t, m = _score_page(page, matchers_by_offering)
+            scores, u, t, m, boost = _score_page(page, matchers_by_offering, domain_boosts)
             decision, top, top_s, runner, runner_s, conf = _decide(scores)
 
             # Count the decision
@@ -423,15 +502,21 @@ def classify(*, page_type: str | None = None,
             else:
                 stats.no_match += 1
 
-            # Audit-log every attempt.
+            # Audit-log every attempt. The domain boost (if any) rides in
+            # url_matches under the reserved key __domain_boost__ so the
+            # audit trail shows exactly how much editorial intent weighed
+            # on this decision without a new column.
             logged_decision = "dry_run" if dry_run else decision
+            url_payload = dict(u)
+            if boost:
+                url_payload["__domain_boost__"] = boost
             cur.execute(INSERT_LOG_SQL, (
                 page["id"],
                 logged_decision,
                 top if decision == "assigned" and not dry_run else None,
                 conf if decision == "assigned" else None,
                 top, top_s, runner, runner_s,
-                json.dumps(u), json.dumps(t), json.dumps(m),
+                json.dumps(url_payload), json.dumps(t), json.dumps(m),
             ))
 
             # Only write pages.offering on a real assignment.
@@ -529,6 +614,9 @@ def main() -> None:
     pc.add_argument("--dry-run", action="store_true", help="log decisions without writing pages.offering")
     pc.add_argument("--min-score", type=int, default=MIN_SCORE)
     pc.add_argument("--min-lead",  type=int, default=MIN_LEAD)
+    pc.add_argument("--reclassify-domain", default=None,
+                    help="clear existing offerings on this host (e.g. damcodigital.com) "
+                         "before classifying — use after tuning pages_offering_priors")
     pc.add_argument("-v", "--verbose", action="store_true")
 
     pr = sub.add_parser("run", help="hydrate then classify")
@@ -566,6 +654,7 @@ def main() -> None:
             max_pages=args.max_pages,
             min_lead=args.min_lead,
             min_score=args.min_score,
+            reclassify_domain=args.reclassify_domain,
         )
         print(f"classify: {out}")
         return
